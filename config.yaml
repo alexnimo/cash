@@ -1,0 +1,76 @@
+# Video Analysis Platform Configuration
+
+app_name: "YouTube Video Analysis Platform"
+
+# Model settings
+model:
+  video_analysis:
+    type: "gemini"
+    name: "gemini-1.5-flash"
+    max_tokens: 1024
+    temperature: 0.7
+  transcription:
+    enabled: true
+    type: "gemini"
+    name: "gemini-1.5-flash"
+  embedding:
+    type: "gemini"
+    name: "gemini-1.5-flash"
+    dimension: 1024
+
+# Vector store settings
+vector_store:
+  type: "pinecone"
+  config:
+    api_key: "${PINECONE_API_KEY}"
+    environment: "${PINECONE_ENVIRONMENT}"
+    index_name: "vid-expert"
+    namespace: "default"
+    metric: "cosine"
+    dimension: 1024
+    cloud: "aws"
+    metadata_config:
+      indexed: ["video_id", "timestamp", "content_type", "language"]
+
+# Storage settings
+storage:
+  transcript_dir: "./data/transcripts"
+  frames_dir: "./data/frames"
+  summaries_dir: "./data/summaries"
+  temp_dir: "./data/temp"
+  cache_dir: "cache"
+  max_cache_size: 5368709120
+
+# API settings
+api:
+  gemini_api_key: "${GEMINI_API_KEY}"
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins: ["http://localhost:8000", "http://127.0.0.1:8000", "file://"]
+
+# LangTrace Configuration
+langtrace:
+  enabled: true
+  api_key: "${LANGTRACE_API_KEY}"
+  project_id: "vid-expert"
+  trace_dir: "./traces"
+  sampling_rate: 1.0
+  trace_models: true
+
+# Processing settings
+processing:
+  chunk_size: 1000
+  chunk_overlap: 200
+  max_tokens_per_request: 4096
+  batch_size: 10
+  timeout: 300
+  max_parallel_chunks: 5
+  max_video_duration: 7200
+
+# Logging settings
+logging:
+  level: "DEBUG"
+
+# Video storage settings
+video_storage:
+  base_dir: "videos"
