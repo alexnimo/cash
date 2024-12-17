@@ -1,2 +1,3 @@
 videos/*
 .env
+app/__pycache__/*
