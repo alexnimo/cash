@@ -1,5 +1,6 @@
 videos/*
 .env
+<<<<<<< HEAD
 *.pyc
 __pycache__/
 app/__pycache__/*
