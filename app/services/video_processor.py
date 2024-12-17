@@ -195,39 +195,80 @@ class VideoProcessor:
 
     async def _download_video(self, video: Video) -> str:
         """Download video from YouTube"""
-        ydl_opts = {
-            'format': 'best[height<=720]',  # Download best quality up to 720p
+        # First download video only
+        video_opts = {
+            'format': 'bestvideo[height<=?720]/mp4',  # Get best video up to 720p
             'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
             'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
             'quiet': True,
             'no_warnings': True,
-            'ignoreerrors': True,
+            'ignoreerrors': False,
             'nocheckcertificate': True,
             'geo_bypass': True
         }
         
         try:
-            # Convert HttpUrl to string
             video_url = str(video.url)
             logger.info(f"Downloading video from URL: {video_url}")
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Download video
+            with yt_dlp.YoutubeDL(video_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
-                video_path = ydl.prepare_filename(info)
+                if info is None:
+                    raise VideoProcessingError("Failed to download video")
                 
+                video_path = ydl.prepare_filename(info)
                 if not os.path.exists(video_path):
-                    # If the file doesn't exist with the prepared filename, try to find it with different extensions
                     potential_files = list(self.video_dir.glob(f'{video.id}.*'))
                     if not potential_files:
                         raise VideoProcessingError(f"Downloaded video file not found for ID: {video.id}")
                     video_path = str(potential_files[0])
                 
                 logger.info(f"Successfully downloaded video to: {video_path}")
+                
+                # Download audio separately
+                audio_opts = {
+                    'format': 'bestaudio/wav',  # Get best audio
+                    'outtmpl': str(self.audio_dir / f'{video.id}.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'ignoreerrors': False,
+                    'nocheckcertificate': True,
+                    'geo_bypass': True
+                }
+                
+                with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                    info = ydl.extract_info(video_url, download=True)
+                    if info is None:
+                        raise VideoProcessingError("Failed to download audio")
+                    
+                    # Store the audio path in the video object
+                    audio_path = str(self.audio_dir / f'{video.id}.wav')
+                    if not os.path.exists(audio_path):
+                        potential_audio_files = list(self.audio_dir.glob(f'{video.id}.*'))
+                        if not potential_audio_files:
+                            raise VideoProcessingError(f"Downloaded audio file not found for ID: {video.id}")
+                        audio_path = str(potential_audio_files[0])
+                    
+                    video.audio_path = audio_path
+                    logger.info(f"Successfully downloaded audio to: {audio_path}")
+                
                 return video_path
             
         except Exception as e:
             logger.error(f"Failed to download video: {str(e)}", exc_info=True)
             raise VideoProcessingError(f"Failed to download video: {str(e)}")
+
+    async def _validate_video_file(self, file_path: str) -> bool:
+        """Validate video file using ffmpeg"""
+        try:
+            import ffmpeg
+            probe = ffmpeg.probe(file_path)
+            video_info = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+            return video_info is not None
+        except Exception as e:
+            logger.error(f"Failed to validate video file: {str(e)}")
+            return False
 
     def _update_download_progress(self, video_id: str, d: dict):
         """Update download progress"""
@@ -247,63 +288,23 @@ class VideoProcessor:
             logger.error(f"Error updating download progress: {str(e)}")
 
     async def _extract_audio(self, video_path: str) -> str:
-        """Extract audio from video file"""
+        """Return path to the already downloaded audio file"""
         try:
-            video_path = Path(video_path).resolve()
-            logger.info(f"Extracting audio from video: {video_path}")
-            video = VideoFileClip(str(video_path))
+            video_id = Path(video_path).stem
+            audio_path = str(self.audio_dir / f'{video_id}.wav')
             
-            # Generate audio path with .wav extension
-            audio_path = (self.audio_dir / f"{video_path.stem}.wav").resolve()
-            logger.info(f"Writing audio to: {audio_path}")
+            # Check for audio file with any extension if exact path not found
+            if not os.path.exists(audio_path):
+                potential_files = list(self.audio_dir.glob(f'{video_id}.*'))
+                if not potential_files:
+                    raise VideoProcessingError("Audio file not found")
+                audio_path = str(potential_files[0])
             
-            # Extract audio with specific parameters for speech recognition
-            audio = video.audio
-            if audio is None:
-                raise VideoProcessingError("No audio track found in video")
-                
-            # Log audio duration for verification
-            logger.info(f"Original video duration: {video.duration:.2f}s")
-            logger.info(f"Audio track duration: {audio.duration:.2f}s")
-            
-            # Extract audio with specific parameters for optimal speech recognition
-            audio.write_audiofile(
-                str(audio_path),
-                fps=16000,        # 16kHz sample rate (good for speech)
-                nbytes=2,         # 16-bit depth
-                codec='pcm_s16le', # PCM format
-                ffmpeg_params=[
-                    "-ac", "1",   # Force mono channel
-                    "-ar", "16000", # Ensure 16kHz sample rate
-                    "-loglevel", "info"  # Show more ffmpeg output for debugging
-                ]
-            )
-            
-            # Verify the extracted audio
-            if not audio_path.exists():
-                raise FileNotFoundError(f"Audio file was not created at: {audio_path}")
-                
-            # Verify audio file size
-            audio_size = os.path.getsize(audio_path)
-            expected_min_size = int(video.duration * 16000 * 2)  # Rough estimate: duration * sample_rate * bytes_per_sample
-            if audio_size < expected_min_size:
-                logger.warning(f"Audio file size ({audio_size} bytes) is smaller than expected ({expected_min_size} bytes)")
-            
-            # Clean up
-            audio.close()
-            video.close()
-            
-            logger.info(f"Audio extraction completed: {audio_path} (size: {audio_size} bytes)")
-            return str(audio_path)
+            logger.info(f"Using audio file: {audio_path}")
+            return audio_path
             
         except Exception as e:
-            logger.error(f"Failed to extract audio: {str(e)}", exc_info=True)
-            # Clean up any partial files
-            try:
-                if 'audio_path' in locals() and os.path.exists(audio_path):
-                    os.remove(audio_path)
-            except:
-                pass
+            logger.error(f"Failed to get audio path: {str(e)}")
             raise VideoProcessingError(f"Failed to extract audio: {str(e)}")
 
     async def _extract_metadata(self, video_path: str) -> VideoMetadata:
@@ -425,7 +426,7 @@ class VideoProcessor:
         try:
             raw_transcript_path = self.raw_transcript_dir / f"{video_id}.txt"
             if raw_transcript_path.exists():
-                with open(raw_transcript_path, "r", encoding="utf-8") as f:
+                with open(raw_transcript_path) as f:
                     return f.read()
             return None
         except Exception as e:
