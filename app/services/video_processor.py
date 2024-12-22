@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import os
 from pathlib import Path
 import logging
@@ -7,9 +7,11 @@ from moviepy import VideoFileClip, AudioFileClip
 import yt_dlp
 import json
 from datetime import datetime
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from app.utils.langtrace_utils import get_langtrace, init_langtrace
 import google.generativeai as genai
-from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata
+from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata, VideoAnalysis
 from app.models.transcript import TranscriptSegment
 from app.core.settings import get_settings
 from app.services.model_manager import ModelManager
@@ -84,84 +86,251 @@ class VideoProcessor:
         except Exception as e:
             raise VideoProcessingError(f"Failed to initialize VideoProcessor: {str(e)}")
 
-    async def process_video(self, video: Video) -> Video:
-        """Process a video for analysis"""
+    async def _get_youtube_transcript(self, video: Video) -> Optional[str]:
+        """
+        Attempt to get the transcript directly from YouTube.
+        First tries to get English transcript, if not available gets any available transcript.
+        Returns the transcript text if available, None otherwise.
+        """
         try:
-            video.status = VideoStatus.PROCESSING
-            self.video_status[video.id].update({
-                "status": VideoStatus.PROCESSING,
+            url = str(video.url)
+            logger.info(f"Attempting to get transcript for video URL: {url}")
+            
+            # Extract video ID from URL
+            video_id = None
+            if 'youtube.com' in url or 'youtu.be' in url:
+                if 'youtube.com/watch?v=' in url:
+                    video_id = url.split('watch?v=')[1].split('&')[0]
+                elif 'youtu.be/' in url:
+                    video_id = url.split('youtu.be/')[1].split('?')[0]
+            
+            if not video_id:
+                logger.warning(f"Could not extract YouTube video ID from URL: {url}")
+                return None
+
+            logger.info(f"Extracted YouTube video ID: {video_id}")
+
+            # Get available transcripts
+            logger.info("Fetching available transcripts...")
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Log available transcripts
+            available_transcripts = list(transcript_list)
+            logger.info(f"Found {len(available_transcripts)} available transcripts:")
+            for t in available_transcripts:
+                logger.info(f"- Language: {t.language_code}, Generated: {t.is_generated}")
+            
+            transcript = None
+            transcript_language = None
+            
+            try:
+                # First try to get English transcript (manual or generated)
+                logger.info("Trying to get English transcript...")
+                transcript = transcript_list.find_transcript(['en'])
+                transcript_language = 'en'
+                logger.info("Found English transcript")
+            except NoTranscriptFound:
+                logger.info("No English transcript found, trying any available transcript...")
+                # Get all available transcripts
+                available = list(transcript_list)
+                if available:
+                    # Use the first available transcript
+                    transcript = available[0]
+                    transcript_language = transcript.language_code
+                    logger.info(f"Using available transcript in language: {transcript_language}")
+                else:
+                    logger.warning("No transcripts available")
+                    return None
+
+            if transcript:
+                # Fetch the transcript data
+                logger.info(f"Fetching transcript data in {transcript_language}...")
+                transcript_data = transcript.fetch()
+                logger.info(f"Got transcript with {len(transcript_data)} segments")
+                
+                # Save raw transcript text
+                raw_text = ' '.join(segment['text'] for segment in transcript_data)
+                raw_transcript_path = self.raw_transcript_dir / f"{video.id}.txt"
+                with open(raw_transcript_path, 'w', encoding='utf-8') as f:
+                    f.write(raw_text)
+                logger.info(f"Saved raw transcript to {raw_transcript_path}")
+                
+                # Save structured transcript to file
+                transcript_path = self.transcript_dir / f"{video.id}.json"
+                logger.info(f"Saving transcript to {transcript_path}")
+                with open(transcript_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        "language": transcript_language,
+                        "segments": transcript_data
+                    }, f, ensure_ascii=False, indent=2)
+                
+                logger.info(f"Successfully saved transcript to {transcript_path}")
+                return str(transcript_path)
+                
+        except TranscriptsDisabled:
+            logger.error("Transcripts are disabled for this video")
+            return None
+        except NoTranscriptFound:
+            logger.error("No transcript found for this video")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting YouTube transcript: {str(e)}", exc_info=True)
+            return None
+
+    async def process_video(self, video: Video) -> Video:
+        """Process a video by downloading it and generating a transcript."""
+        try:
+            # Update status
+            self.video_status[video.id] = {
+                "status": "processing",
                 "progress": {
                     "downloading": 0,
                     "transcribing": 0,
                     "analyzing": 0,
                     "extracting_frames": 0
-                }
-            })
-            logger.info(f"Processing video {video.id}")
-            
-            # Download YouTube video
-            logger.info("Starting video download")
-            video.file_path = await self._download_video(video)
-            self.video_status[video.id]["progress"]["downloading"] = 100
-            logger.info(f"Downloaded video to {video.file_path}")
-            
-            # Extract metadata
-            video.metadata = await self._extract_metadata(video.file_path)
-            logger.info(f"Extracted metadata: duration={video.metadata.duration}s")
-            
-            # Extract frames
-            logger.info("Starting frame extraction")
-            self.video_status[video.id]["progress"]["extracting_frames"] = 0
-            frames = await self._extract_frames(video)
-            self.video_status[video.id]["progress"]["extracting_frames"] = 100
-            logger.info("Frame extraction completed")
-            
-            # Initialize transcription progress
-            self.video_status[video.id]["progress"]["transcribing"] = 0
-            
-            # Check if transcript exists locally first
-            transcript_path = self.transcript_dir / f"{video.id}.json"
-            if transcript_path.exists():
-                logger.info(f"Found local transcript at {transcript_path}")
-                with open(transcript_path) as f:
-                    video.transcript = [TranscriptSegment(**segment) for segment in json.load(f)]
-                self.video_status[video.id]["progress"]["transcribing"] = 100
-            else:
-                # Extract audio and generate transcript
-                video.audio_path = await self._extract_audio(video.file_path)
-                video.transcript = await self._generate_transcript(video)
-                
-                # Save transcript locally
-                self._save_transcript_locally(video.id, video.transcript)
-                self.video_status[video.id]["progress"]["transcribing"] = 100
-                logger.info("Transcript generation and storage completed")
+                },
+                "url": str(video.url)
+            }
 
-            # Align frames with transcript segments
-            logger.info("Aligning frames with transcript segments")
-            video.transcript = await self._align_frames_with_transcript(video, frames)
+            # Download video
+            logger.info(f"Processing video {video.id}")
+            video_path = await self._download_video(video)
+            video.file_path = video_path
+            logger.info(f"Video downloaded to {video_path}")
+
+            # Extract frames
+            logger.info(f"Extracting frames from video {video.id}")
+            frames = await self._extract_frames(video)
+            logger.debug(f"Extracted frames: {frames}")
             
-            # Analyze content and generate summaries
-            logger.info("Analyzing video content")
-            self.video_status[video.id]["progress"]["analyzing"] = 0
-            summaries = await self.content_analyzer.analyze_video_content(video)
+            if frames:
+                # Update analysis with frame paths
+                if not video.analysis:
+                    logger.debug("Creating new VideoAnalysis with extracted frames")
+                    video.analysis = VideoAnalysis(
+                        transcript='',
+                        summary='',
+                        key_frames=frames,
+                        embedding_id=''
+                    )
+                else:
+                    logger.debug(f"Updating existing VideoAnalysis with {len(frames)} frames")
+                    video.analysis.key_frames = frames
+                logger.info(f"Extracted {len(frames)} frames")
+                self.video_status[video.id]["progress"]["extracting_frames"] = 100
+            else:
+                logger.warning("No frames were extracted")
+
+            # Extract metadata
+            logger.info(f"Extracting metadata for video {video.id}")
+            video.metadata = await self._extract_metadata(video_path)
+            logger.info(f"Metadata extracted: {video.metadata}")
+
+            # Try to get transcript from YouTube if it's a YouTube video
+            transcript_obtained = False
+            if video.source == VideoSource.YOUTUBE:
+                try:
+                    logger.info(f"Attempting to get YouTube transcript for video {video.id}")
+                    transcript_path = await self._get_youtube_transcript(video)
+                    if transcript_path:
+                        logger.info(f"Successfully retrieved YouTube transcript from {transcript_path}")
+                        # Parse the saved transcript file
+                        with open(transcript_path) as f:
+                            transcript_data = json.load(f)
+                            logger.info(f"Loaded transcript data with language: {transcript_data.get('language')}")
+                            video.transcript = [TranscriptSegment(
+                                start_time=entry['start'],
+                                end_time=entry['start'] + entry['duration'],
+                                text=entry['text'],
+                                language=transcript_data["language"]
+                            ) for entry in transcript_data["segments"]]
+                            logger.info(f"Created {len(video.transcript)} transcript segments")
+                        self.video_status[video.id]["progress"]["transcribing"] = 100
+                        logger.info("Using YouTube transcript")
+                        transcript_obtained = True
+                except Exception as e:
+                    logger.error(f"Failed to get YouTube transcript: {str(e)}", exc_info=True)
+                    transcript_obtained = False
+
+            # If no YouTube transcript available, proceed with audio extraction and transcription
+            if not transcript_obtained:
+                try:
+                    # Extract audio
+                    logger.info(f"Extracting audio from video {video.id}")
+                    audio_path = await self._extract_audio(video_path)
+                    logger.info(f"Audio extracted to {audio_path}")
+
+                    # Generate transcript
+                    logger.info(f"Generating transcript for video {video.id}")
+                    video.transcript = await self._generate_transcript(audio_path)
+                    self.video_status[video.id]["progress"]["transcribing"] = 100
+                    logger.info("Transcript generated successfully")
+                except Exception as e:
+                    logger.error(f"Failed to generate transcript: {str(e)}")
+                    raise VideoProcessingError(f"Failed to generate transcript: {str(e)}")
+
+            # Analyze content
+            logger.info(f"Analyzing content for video {video.id}")
+            video = await self._analyze_content(video)
             self.video_status[video.id]["progress"]["analyzing"] = 100
-            logger.info(f"Generated {len(summaries)} content summaries")
+            logger.info("Content analysis completed")
+
+            # Generate frames report after all processing is complete
+            try:
+                logger.info(f"Generating frames report for video {video.id}")
+                report_path = self.content_analyzer.report_generator.generate_frames_report(video)
+                logger.info(f"Successfully generated frames report at {report_path}")
+            except Exception as e:
+                logger.error(f"Failed to generate frames report: {str(e)}", exc_info=True)
+
+            # Update status
+            self.video_status[video.id]["status"] = "completed"
+            logger.info(f"Video {video.id} processed successfully")
+
+            return video
+
+        except Exception as e:
+            logger.error(f"Failed to process video: {str(e)}")
+            if video.id in self.video_status:
+                self.video_status[video.id]["status"] = "failed"
+            raise VideoProcessingError(f"Failed to process video: {str(e)}")
+
+    async def _analyze_content(self, video: Video) -> Video:
+        """Analyze video content using the content analyzer."""
+        try:
+            logger.info(f"Starting content analysis for video {video.id}")
             
-            # Mark as completed
-            video.status = VideoStatus.COMPLETED
+            # Load raw transcript
+            raw_transcript = await self._load_raw_transcript(video.id)
+            if not raw_transcript:
+                raise VideoProcessingError("No transcript available for analysis")
+            
+            # Process transcript to identify stock discussions and segments
+            transcript_analysis = await self.content_analyzer._process_transcript(video, raw_transcript)
+            
+            if not transcript_analysis or 'raw_response' not in transcript_analysis:
+                raise VideoProcessingError("Failed to analyze transcript content")
+            
+            # Create final analysis object
+            video.analysis = VideoAnalysis(
+                transcript=raw_transcript,
+                summary=transcript_analysis.get('raw_response', ''),
+                key_frames=video.analysis.key_frames if video.analysis and video.analysis.key_frames else [],
+                segments=transcript_analysis.get('stocks', []),
+                frame_analysis={},  # Empty for now
+                embedding_id=""  # Will be set when embedding is created
+            )
+            
+            # Update video status
             self.video_status[video.id]["status"] = VideoStatus.COMPLETED
-            logger.info(f"Completed processing video {video.id}")
+            self.video_status[video.id]["progress"]["analysis"] = 100
+            
+            logger.info("Content analysis completed successfully")
             return video
             
         except Exception as e:
-            video.status = VideoStatus.FAILED
-            video.error = str(e)
-            self.video_status[video.id].update({
-                "status": VideoStatus.FAILED,
-                "error": str(e)
-            })
-            logger.error(f"Failed to process video: {str(e)}")
-            raise VideoProcessingError(f"Failed to process video: {str(e)}")
+            logger.error(f"Failed to analyze content: {str(e)}")
+            raise VideoProcessingError(f"Failed to analyze content: {str(e)}")
 
     async def process_playlist(self, url: str) -> List[str]:
         """Process a YouTube playlist and return list of video IDs"""
@@ -195,28 +364,30 @@ class VideoProcessor:
 
     async def _download_video(self, video: Video) -> str:
         """Download video from YouTube"""
-        ydl_opts = {
-            'format': 'best[height<=720]',  # Download best quality up to 720p
-            'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
-            'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True,
-            'nocheckcertificate': True,
-            'geo_bypass': True
-        }
-        
         try:
-            # Convert HttpUrl to string
             video_url = str(video.url)
             logger.info(f"Downloading video from URL: {video_url}")
             
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Download video only
+            video_opts = {
+                'format': 'bestvideo[height<=?720]/mp4',  # Get best video up to 720p
+                'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
+                'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': False,
+                'nocheckcertificate': True,
+                'geo_bypass': True
+            }
+            
+            # Download video
+            with yt_dlp.YoutubeDL(video_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
-                video_path = ydl.prepare_filename(info)
+                if info is None:
+                    raise VideoProcessingError("Failed to download video")
                 
+                video_path = ydl.prepare_filename(info)
                 if not os.path.exists(video_path):
-                    # If the file doesn't exist with the prepared filename, try to find it with different extensions
                     potential_files = list(self.video_dir.glob(f'{video.id}.*'))
                     if not potential_files:
                         raise VideoProcessingError(f"Downloaded video file not found for ID: {video.id}")
@@ -228,6 +399,17 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Failed to download video: {str(e)}", exc_info=True)
             raise VideoProcessingError(f"Failed to download video: {str(e)}")
+
+    async def _validate_video_file(self, file_path: str) -> bool:
+        """Validate video file using ffmpeg"""
+        try:
+            import ffmpeg
+            probe = ffmpeg.probe(file_path)
+            video_info = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+            return video_info is not None
+        except Exception as e:
+            logger.error(f"Failed to validate video file: {str(e)}")
+            return False
 
     def _update_download_progress(self, video_id: str, d: dict):
         """Update download progress"""
@@ -247,63 +429,56 @@ class VideoProcessor:
             logger.error(f"Error updating download progress: {str(e)}")
 
     async def _extract_audio(self, video_path: str) -> str:
-        """Extract audio from video file"""
+        """Download audio from video URL"""
         try:
-            video_path = Path(video_path).resolve()
-            logger.info(f"Extracting audio from video: {video_path}")
-            video = VideoFileClip(str(video_path))
+            video_id = Path(video_path).stem
+            audio_path = str(self.audio_dir / f'{video_id}.wav')
             
-            # Generate audio path with .wav extension
-            audio_path = (self.audio_dir / f"{video_path.stem}.wav").resolve()
-            logger.info(f"Writing audio to: {audio_path}")
+            # Get video URL from the video status
+            video_url = None
+            for vid_id, status in self.video_status.items():
+                if vid_id == video_id:
+                    video_url = status.get('url')
+                    break
             
-            # Extract audio with specific parameters for speech recognition
-            audio = video.audio
-            if audio is None:
-                raise VideoProcessingError("No audio track found in video")
+            if not video_url:
+                # If URL not found in status, try to use the original video path
+                video_url = str(video_path)
+            
+            logger.info(f"Downloading audio from URL: {video_url}")
+            
+            # Download audio separately
+            audio_opts = {
+                'format': 'bestaudio/wav',  # Get best audio
+                'outtmpl': str(self.audio_dir / f'{video_id}.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': False,
+                'nocheckcertificate': True,
+                'geo_bypass': True,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                }]
+            }
+            
+            with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                info = ydl.extract_info(video_url, download=True)
+                if info is None:
+                    raise VideoProcessingError("Failed to download audio")
                 
-            # Log audio duration for verification
-            logger.info(f"Original video duration: {video.duration:.2f}s")
-            logger.info(f"Audio track duration: {audio.duration:.2f}s")
-            
-            # Extract audio with specific parameters for optimal speech recognition
-            audio.write_audiofile(
-                str(audio_path),
-                fps=16000,        # 16kHz sample rate (good for speech)
-                nbytes=2,         # 16-bit depth
-                codec='pcm_s16le', # PCM format
-                ffmpeg_params=[
-                    "-ac", "1",   # Force mono channel
-                    "-ar", "16000", # Ensure 16kHz sample rate
-                    "-loglevel", "info"  # Show more ffmpeg output for debugging
-                ]
-            )
-            
-            # Verify the extracted audio
-            if not audio_path.exists():
-                raise FileNotFoundError(f"Audio file was not created at: {audio_path}")
+                # Check for audio file
+                if not os.path.exists(audio_path):
+                    potential_audio_files = list(self.audio_dir.glob(f'{video_id}.*'))
+                    if not potential_audio_files:
+                        raise VideoProcessingError(f"Downloaded audio file not found for ID: {video_id}")
+                    audio_path = str(potential_audio_files[0])
                 
-            # Verify audio file size
-            audio_size = os.path.getsize(audio_path)
-            expected_min_size = int(video.duration * 16000 * 2)  # Rough estimate: duration * sample_rate * bytes_per_sample
-            if audio_size < expected_min_size:
-                logger.warning(f"Audio file size ({audio_size} bytes) is smaller than expected ({expected_min_size} bytes)")
-            
-            # Clean up
-            audio.close()
-            video.close()
-            
-            logger.info(f"Audio extraction completed: {audio_path} (size: {audio_size} bytes)")
-            return str(audio_path)
+                logger.info(f"Successfully downloaded audio to: {audio_path}")
+                return audio_path
             
         except Exception as e:
-            logger.error(f"Failed to extract audio: {str(e)}", exc_info=True)
-            # Clean up any partial files
-            try:
-                if 'audio_path' in locals() and os.path.exists(audio_path):
-                    os.remove(audio_path)
-            except:
-                pass
+            logger.error(f"Failed to download audio: {str(e)}")
             raise VideoProcessingError(f"Failed to extract audio: {str(e)}")
 
     async def _extract_metadata(self, video_path: str) -> VideoMetadata:
@@ -328,109 +503,128 @@ class VideoProcessor:
             logger.error(f"Failed to extract metadata: {str(e)}", exc_info=True)
             raise VideoProcessingError(f"Failed to extract metadata: {str(e)}")
 
-    async def _generate_transcript(self, video: Video) -> List[TranscriptSegment]:
+    async def _generate_transcript(self, audio_path: str) -> List[TranscriptSegment]:
         """Generate transcript from audio file using Gemini"""
         try:
-            logger.info(f"Generating transcript for video {video.id}")
+            logger.info(f"Generating transcript for audio {audio_path}")
             
-            # Check if raw transcript exists first
-            raw_text = self._load_raw_transcript(video.id)
-            if raw_text:
-                logger.info(f"Found existing raw transcript for video {video.id}")
-            else:
-                try:
-                    # Add exponential backoff retry logic
-                    max_retries = 5
-                    base_delay = 2  # seconds
+            # Check if transcript exists first
+            video_id = Path(audio_path).stem
+            transcript_path = self.transcript_dir / f"{video_id}.json"
+            if transcript_path.exists():
+                logger.info(f"Found existing transcript at {transcript_path}")
+                with open(transcript_path, 'r', encoding='utf-8') as f:
+                    transcript_data = json.load(f)
+                    return [TranscriptSegment(
+                        start_time=segment['start'],
+                        end_time=segment['start'] + segment['duration'],
+                        text=segment['text'],
+                        language=transcript_data['language']
+                    ) for segment in transcript_data['segments']]
                     
-                    for attempt in range(max_retries):
-                        try:
-                            # Single Gemini API call to get transcript
-                            raw_text = await self.model_manager.transcribe_audio(video.audio_path)
-                            if not raw_text:
-                                raise VideoProcessingError("Received empty transcript from model")
-                            
-                            # Save raw transcript immediately after successful generation
-                            self._save_raw_transcript(video.id, raw_text)
-                            break  # Success! Break out of retry loop
-                            
-                        except Exception as e:
-                            if "429" in str(e) or "Resource has been exhausted" in str(e):
-                                if attempt < max_retries - 1:  # Don't wait on last attempt
-                                    wait_time = base_delay * (2 ** attempt)  # Exponential backoff
-                                    logger.warning(f"Rate limit hit, waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}")
-                                    await asyncio.sleep(wait_time)
-                                    continue
-                            raise  # Re-raise if not a rate limit error or out of retries
-                    else:
-                        raise VideoProcessingError("Failed to transcribe after maximum retries")
-                    
-                except Exception as e:
-                    error_msg = str(e)
-                    if "429" in error_msg or "Resource has been exhausted" in error_msg:
-                        error_msg = "API rate limit exceeded. Please try again later."
-                    logger.error(f"Transcription failed: {error_msg}")
-                    raise VideoProcessingError(f"Failed to generate transcript: {error_msg}")
+            # If no transcript exists, generate one
+            try:
+                # Add exponential backoff retry logic
+                base_delay = 1  # Start with 1 second delay
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # Single Gemini API call to get transcript
+                        raw_text = await self.model_manager.transcribe_audio(audio_path)
+                        if not raw_text:
+                            raise VideoProcessingError("Received empty transcript from model")
+                        
+                        # Save raw transcript immediately after successful generation
+                        self._save_raw_transcript(Path(audio_path).stem, raw_text)
+                        break  # Success! Break out of retry loop
+                        
+                    except Exception as e:
+                        if "429" in str(e) or "Resource has been exhausted" in str(e):
+                            if attempt < max_retries - 1:  # Don't wait on last attempt
+                                wait_time = base_delay * (2 ** attempt)  # Exponential backoff
+                                logger.warning(f"Rate limit hit, waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}")
+                                await asyncio.sleep(wait_time)
+                                continue
+                        raise  # Re-raise if not a rate limit error or out of retries
+                else:
+                    raise VideoProcessingError("Failed to transcribe after maximum retries")
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "Resource has been exhausted" in error_msg:
+                    error_msg = "API rate limit exceeded. Please try again later."
+                logger.error(f"Transcription failed: {error_msg}")
+                raise VideoProcessingError(f"Failed to generate transcript: {error_msg}")
             
-            # Validate transcript text
-            if not isinstance(raw_text, str) or not raw_text.strip():
-                raise VideoProcessingError("Invalid transcript received from model")
-            
-            # Simple segmentation without using Gemini
+            # Process raw transcript into segments
             words = raw_text.split()
-            if not words:
-                raise VideoProcessingError("Transcript contains no words")
-            
             words_per_segment = 20
             segments = []
             total_words = len(words)
-            segment_duration = video.metadata.duration / (total_words / words_per_segment)
+            segment_duration = 10  # Assume 10 seconds per segment
             
             for i in range(0, total_words, words_per_segment):
                 segment_words = words[i:i + words_per_segment]
-                start_time = float(i / total_words * video.metadata.duration)
-                end_time = min(start_time + segment_duration, video.metadata.duration)
+                start_time = float(i / total_words * segment_duration)
+                end_time = min(start_time + segment_duration, segment_duration)
                 segments.append(TranscriptSegment(
                     start_time=start_time,
                     end_time=end_time,
-                    text=" ".join(segment_words)
+                    text=' '.join(segment_words),
+                    language='en'  # Default to English for generated transcripts
                 ))
             
-            if not segments:
-                raise VideoProcessingError("Failed to generate transcript segments")
+            # Save structured transcript
+            transcript_data = {
+                "language": "en",
+                "segments": [{
+                    "start": segment.start_time,
+                    "duration": segment.end_time - segment.start_time,
+                    "text": segment.text
+                } for segment in segments]
+            }
+            with open(transcript_path, 'w', encoding='utf-8') as f:
+                json.dump(transcript_data, f, indent=2)
+            logger.info(f"Saved structured transcript to {transcript_path}")
             
-            logger.info(f"Generated {len(segments)} transcript segments")
             return segments
+            
+        except Exception as e:
+            logger.error(f"Failed to generate transcript: {str(e)}")
+            raise VideoProcessingError(f"Failed to generate transcript: {str(e)}")
+
+    async def _load_raw_transcript(self, video_id: str) -> Optional[str]:
+        """Load transcript text from structured transcript file with timestamps"""
+        try:
+            transcript_path = self.transcript_dir / f"{video_id}.json"
+            if not transcript_path.exists():
+                logger.warning(f"Transcript file not found: {transcript_path}")
+                return None
+                
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                transcript_data = json.load(f)
+                # Format each segment with its timestamp
+                segments = []
+                for segment in transcript_data['segments']:
+                    start_time = segment['start']
+                    text = segment['text']
+                    segments.append(f"[{start_time:.2f}s] {text}")
+                return '\n'.join(segments)
                 
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "Resource has been exhausted" in error_msg:
-                error_msg = "API rate limit exceeded. Please try again later."
-            logger.error(f"Failed to generate transcript: {error_msg}")
-            raise VideoProcessingError(f"Failed to generate transcript: {error_msg}")
+            logger.error(f"Failed to load transcript: {str(e)}")
+            return None
 
-    def _save_raw_transcript(self, video_id: str, text: str) -> None:
+    def _save_raw_transcript(self, video_id: str, text: str):
         """Save raw transcript text to file"""
         try:
-            raw_transcript_path = self.raw_transcript_dir / f"{video_id}.txt"
-            with open(raw_transcript_path, "w", encoding="utf-8") as f:
+            file_path = self.raw_transcript_dir / f"{video_id}.txt"
+            with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(text)
-            logger.info(f"Saved raw transcript to {raw_transcript_path}")
+            logger.info(f"Saved raw transcript to {file_path}")
         except Exception as e:
             logger.error(f"Failed to save raw transcript: {str(e)}")
-            # Don't raise error since this is not critical
-
-    def _load_raw_transcript(self, video_id: str) -> Optional[str]:
-        """Load raw transcript text from file"""
-        try:
-            raw_transcript_path = self.raw_transcript_dir / f"{video_id}.txt"
-            if raw_transcript_path.exists():
-                with open(raw_transcript_path, "r", encoding="utf-8") as f:
-                    return f.read()
-            return None
-        except Exception as e:
-            logger.error(f"Failed to load raw transcript: {str(e)}")
-            return None
+            raise VideoProcessingError(f"Failed to save raw transcript: {str(e)}")
 
     def _save_transcript_locally(self, video_id: str, transcript: List[TranscriptSegment]) -> None:
         """Save transcript to local file"""
@@ -554,3 +748,14 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Failed to align frames with transcript: {str(e)}", exc_info=True)
             raise VideoProcessingError(f"Failed to align frames with transcript: {str(e)}")
+
+    async def _save_analysis_json(self, video_id: str, analysis: Dict[str, Any]) -> None:
+        """Save the analysis in JSON format"""
+        try:
+            analysis_path = self.transcript_dir / f"{video_id}_analysis.json"
+            with open(analysis_path, 'w', encoding='utf-8') as f:
+                json.dump(analysis, f, indent=4, ensure_ascii=False)
+            logger.info(f"Saved analysis JSON to {analysis_path}")
+        except Exception as e:
+            logger.error(f"Failed to save analysis JSON: {str(e)}")
+            raise VideoProcessingError(f"Failed to save analysis JSON: {str(e)}")

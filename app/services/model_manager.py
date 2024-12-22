@@ -86,11 +86,39 @@ class ModelManager:
         logger.warning("Rate limit reached, requests will be delayed")
         
     async def _wait_for_rate_limit(self, model_name: str) -> bool:
-        """Wait for rate limit"""
-        if not self.rate_limiter.allow_request():
-            logger.debug(f"Rate limiting {model_name}: waiting for next available slot")
-            await self.rate_limiter.wait()
-        return True
+        """Wait for rate limit and handle quota exceeded errors"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                if not self.rate_limiter.allow_request():
+                    logger.debug(f"Rate limiting {model_name}: waiting for next available slot")
+                    await self.rate_limiter.wait()
+                
+                # Check quota status
+                quota_status = self._quota_status.get(model_name, {})
+                if quota_status.get('status') == 'exceeded':
+                    last_error_time = quota_status.get('last_error_time')
+                    if last_error_time:
+                        time_since_error = datetime.datetime.now() - last_error_time
+                        if time_since_error.total_seconds() < 60:  # Wait 60 seconds after quota exceeded
+                            wait_time = 60 - time_since_error.total_seconds()
+                            logger.warning(f"Quota exceeded for {model_name}, waiting {wait_time:.1f} seconds")
+                            await asyncio.sleep(wait_time)
+                
+                return True
+                
+            except Exception as e:
+                if "429" in str(e):
+                    retry_count += 1
+                    wait_time = 60  # Wait 60 seconds on 429 error
+                    logger.warning(f"Rate limit (429) hit for {model_name}, retry {retry_count}/{max_retries} after {wait_time}s")
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise
+        
+        raise QuotaExceededError(f"Max retries ({max_retries}) exceeded for {model_name}")
         
     async def _initialize_model(self, model_name: str) -> Any:
         """Lazy initialization of models only when needed"""
@@ -108,7 +136,6 @@ class ModelManager:
                 "temperature": config.temperature,
                 "top_p": 1,
                 "top_k": 1,
-                "max_output_tokens": config.max_tokens,
             }
             
             safety_settings = [
@@ -231,7 +258,6 @@ class ModelManager:
             "generation_config": {
                 "temperature": 0.1,  # Low temperature for more accurate transcription
                 "candidate_count": 1,
-                "max_output_tokens": 1024,  # Increased for longer transcriptions
                 "top_p": 0.8,
                 "top_k": 40
             },
@@ -299,52 +325,71 @@ class ModelManager:
             # Get model and config
             model, model_config = await self.get_transcription_model()
             logger.debug(f"Using model config: {model_config}")
-            
-            if not model:
-                raise TranscriptionError("Transcription model not available")
-            
-            # Check quota status
-            if self._quota_status[self.settings.model.transcription.name]['status'] != 'available':
-                raise QuotaExceededError("Transcription quota exceeded")
-            
-            # Wait for rate limit
-            if not await self._wait_for_rate_limit(self.settings.model.transcription.name):
-                raise TranscriptionError("Rate limit exceeded")
-            
+
+            # Upload file using Gemini's file API
             try:
-                # Prepare the audio file
-                logger.debug(f"Preparing audio file: {audio_path}")
-                audio_input, input_type = self._prepare_audio_input(audio_path)
-                logger.debug(f"Audio input prepared with type: {input_type}")
-                
-                # Generate transcript using the prepared input
-                logger.debug("Generating transcript...")
-                response = model.generate_content(
-                    [audio_input, "Please transcribe this audio accurately, maintaining proper punctuation and speaker labels if multiple speakers are present."],
-                    generation_config=model_config["generation_config"],
-                    safety_settings=model_config["safety_settings"]
-                )
-                logger.debug(f"Raw response: {response}")
-                
-                if not response or not response.text:
-                    raise TranscriptionError("Empty response from transcription model")
-                
-                transcript = response.text.strip()
-                logger.debug(f"Generated transcript: {transcript[:100]}...")  # Log first 100 chars
-                return transcript
-                
+                audio_file = genai.upload_file(audio_path, mime_type="audio/wav")
+                logger.info(f"Successfully uploaded audio file: {audio_path}")
             except Exception as e:
-                logger.error(f"Error during transcription: {str(e)}", exc_info=True)
-                raise TranscriptionError(f"Transcription failed: {str(e)}")
+                logger.error(f"Failed to upload audio file: {str(e)}")
+                raise TranscriptionError(f"Failed to upload audio file: {str(e)}")
+
+            # Configure the model with the specific config for transcription
+            transcription_config = self.model_configs[self.settings.model.transcription.name]
+            model = genai.GenerativeModel(
+                model_name=transcription_config.name,
+                generation_config={
+                    "temperature": transcription_config.temperature or 0.1,
+                    "candidate_count": 1,
+                    "top_p": 0.8,
+                    "top_k": 40
+                },
+                safety_settings=model_config["safety_settings"]
+            )
+
+            # Create transcription prompt
+            prompt = """
+            Your task is to provide a complete and accurate transcription of the entire audio file.
+            Requirements:
+            1. Transcribe ALL spoken content from start to finish
+            2. Do not skip or summarize any parts
+            3. Format as plain text without timestamps or speaker labels
+            4. Maintain word-for-word accuracy
+            5. Include every single word that is spoken
             
-        except QuotaExceededError as e:
-            logger.error(f"Quota exceeded for transcription: {str(e)}")
-            self._update_quota_status(self.settings.model.transcription.name, error=e)
-            raise
+            Important: The transcription must be complete and cover the entire duration of the audio.
+            """
+
+            try:
+                # Generate transcription with streaming to handle longer content
+                response = model.generate_content([prompt, audio_file], stream=True, request_options={"timeout": 1000})
+                
+                # Collect all response chunks
+                transcript_parts = []
+                for chunk in response:
+                    if chunk.text:
+                        transcript_parts.append(chunk.text.strip())
+                
+                # Combine all parts
+                transcript = " ".join(transcript_parts)
+                
+                logger.info(f"Successfully transcribed audio file: {audio_path}")
+                return transcript
+
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg:
+                    logger.error("Rate limit exceeded during transcription")
+                    raise QuotaExceededError("Rate limit exceeded")
+                else:
+                    logger.error(f"Transcription failed: {error_msg}")
+                    raise TranscriptionError(f"Transcription failed: {error_msg}")
+
         except Exception as e:
-            logger.error(f"Failed to transcribe audio: {str(e)}", exc_info=True)
-            self._update_quota_status(self.settings.model.transcription.name, error=e)
-            raise TranscriptionError(f"Transcription failed: {str(e)}")
+            if isinstance(e, (QuotaExceededError, TranscriptionError)):
+                raise
+            logger.error(f"Unexpected error during transcription: {str(e)}")
+            raise TranscriptionError(f"Unexpected error during transcription: {str(e)}")
 
     async def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for text using configured embedding model"""
@@ -396,31 +441,31 @@ class ModelManager:
 
     def _update_quota_status(self, model_name, error=None):
         """Update quota status for a model based on API response"""
-        if error:
-            error_msg = str(error).lower()
-            if any(err in error_msg for err in ["429", "quota", "exhausted", "rate limit"]):
+        if model_name not in self._quota_status:
+            return
+            
+        if error is None:
+            # Reset status if call was successful
+            self._quota_status[model_name].update({
+                'status': 'available',
+                'error': None,
+                'last_error_time': None
+            })
+        else:
+            error_str = str(error).lower()
+            if "429" in error_str or "quota" in error_str or "resource exhausted" in error_str:
                 self._quota_status[model_name].update({
-                    'status': 'exhausted',
-                    'error': 'API quota exhausted',
+                    'status': 'exceeded',
+                    'error': str(error),
                     'last_error_time': datetime.datetime.now()
                 })
+                logger.warning(f"Quota exceeded for {model_name}: {error}")
             else:
                 self._quota_status[model_name].update({
                     'status': 'error',
                     'error': str(error),
                     'last_error_time': datetime.datetime.now()
                 })
-        else:
-            # If no error, check if we should reset exhausted status
-            if self._quota_status[model_name]['status'] == 'exhausted':
-                last_error = self._quota_status[model_name]['last_error_time']
-                if last_error and (datetime.datetime.now() - last_error).total_seconds() > 60:
-                    # Reset after 1 minute
-                    self._quota_status[model_name].update({
-                        'status': 'available',
-                        'error': None,
-                        'last_error_time': None
-                    })
 
     async def check_quota(self):
         """Check API quota status for gemini-flash models only"""

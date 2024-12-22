@@ -6,7 +6,7 @@ app_name: "YouTube Video Analysis Platform"
 model:
   video_analysis:
     type: "gemini"
-    name: "gemini-1.5-flash"
+    name: "gemini-2.0-flash-exp"
     max_tokens: 1024
     temperature: 0.7
   transcription:
@@ -15,7 +15,7 @@ model:
     name: "gemini-1.5-flash"
   embedding:
     type: "gemini"
-    name: "gemini-1.5-flash"
+    name: "gemini-2.0-flash-exp"
     dimension: 1024
 
 # Vector store settings
@@ -66,6 +66,12 @@ processing:
   timeout: 300
   max_parallel_chunks: 5
   max_video_duration: 7200
+
+# Rate limiting settings
+rate_limit:
+  retry_delay_seconds: 60
+  max_retries: 3
+  batch_size: 10  # Number of frames to process in parallel
 
 # Logging settings
 logging:

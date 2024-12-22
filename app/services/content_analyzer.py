@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from app.core.config import get_settings
 from app.models.video import Video, VideoStatus
 from app.services.model_manager import ModelManager
+from app.services.report_generator import ReportGenerator
 from app.utils.langtrace_utils import get_langtrace, trace_llm_call, init_langtrace
 from PIL import Image
 
@@ -36,12 +37,25 @@ class ContentAnalyzer:
         self.transcript_dir = (self.video_dir / "transcripts").resolve()
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         
+        # Create raw transcript directory
+        self.raw_transcript_dir = (self.video_dir / "raw_transcripts").resolve()
+        self.raw_transcript_dir.mkdir(parents=True, exist_ok=True)
+        
         # Create summaries directory if it doesn't exist
         self.summaries_dir = (self.video_dir / "summaries").resolve()
         self.summaries_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create reports directory if it doesn't exist
+        self.reports_dir = (self.video_dir / "reports").resolve()
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize report generator
+        self.report_generator = ReportGenerator(str(self.reports_dir))
         
         logger.info(f"Initialized ContentAnalyzer with transcript_dir: {self.transcript_dir}")
+        logger.info(f"Initialized ContentAnalyzer with raw_transcript_dir: {self.raw_transcript_dir}")
         logger.info(f"Initialized ContentAnalyzer with summaries_dir: {self.summaries_dir}")
+        logger.info(f"Initialized ContentAnalyzer with reports_dir: {self.reports_dir}")
         
         # Get langtrace instance
         self.langtrace = get_langtrace()
@@ -56,8 +70,8 @@ class ContentAnalyzer:
             self.video_analysis_model = await self.model_manager.get_video_analysis_model()
         return self.video_analysis_model
 
-    async def _analyze_transcript_segment(self, segment_text: str, parent_trace=None) -> Dict[str, Any]:
-        """Analyze a transcript segment to determine its category and content"""
+    async def _analyze_transcript_segment(self, transcript_text: str, parent_trace=None) -> List[Dict[str, Any]]:
+        """Analyze the full transcript and break it into meaningful segments"""
         try:
             # Wait for rate limit before proceeding
             model_name = self.settings.model.transcription.name
@@ -66,368 +80,423 @@ class ContentAnalyzer:
             # Get the model for analysis
             model = await self.model_manager._initialize_model(model_name)
             
-            if not segment_text or len(segment_text.strip()) < 10:
-                logger.warning("Empty or very short segment, skipping analysis")
-                return {
-                    'category': 'general discussions',
-                    'stock': None,
-                    'summary': segment_text[:200] + "...",
-                    'include': False
-                }
+            if not transcript_text or len(transcript_text.strip()) < 10:
+                logger.warning("Empty or very short transcript, skipping analysis")
+                return []
                 
-            prompt = f"""You are a financial content analyzer. Analyze this video transcript segment and provide a detailed analysis.
-            
+            prompt = f"""You are a financial content analyzer. Analyze this complete video transcript and break it down into meaningful segments.
+            The transcript includes timestamps in [HH:MM:SS] format. Use these to determine segment boundaries.
+
             Instructions:
-            1. Categorize the content into: 'stock analysis', 'daily news', or 'general discussions'
-            2. For stock analysis, identify the specific stock ticker/name
-            3. Provide a concise but informative summary of the key points
-            4. Include any relevant market data or metrics mentioned
-            5. Note any significant trends or patterns discussed
-            
-            Transcript segment:
-            {segment_text}
-            
-            Format your response as follows:
-            category: [category]
-            stock: [stock ticker/name or 'none']
-            summary: [your analysis]
-            include: [true/false - indicate if this segment contains meaningful financial content]
+            1. Read and understand the entire transcript to get the full context
+            2. Break it down into logical segments based on topic changes and content
+            3. For each segment provide:
+               - Topic category (e.g., 'market analysis', 'stock analysis', 'general discussion')
+               - All stocks mentioned (use ticker symbols)
+               - Precise timestamps from the transcript
+               - Detailed summary of what was discussed
+               - Key points and insights
+               - Overall conclusion for the segment
+
+            Transcript:
+            {transcript_text}
+
+            Format your response as a JSON array of segments. Each segment must have:
+            - topic: "<category>"
+            - stocks: [list of stock tickers]
+            - start_time: "MM:SS" (from transcript timestamps)
+            - end_time: "MM:SS" (from transcript timestamps)
+            - summary: "detailed description of what was discussed"
+            - key_points: ["point 1", "point 2", ...]
+            - overall_summary: "conclusion about this segment"
+
+            Example segment:
+            {{
+                "topic": "<market analysis>",
+                "stocks": ["SPY", "QQQ"],
+                "start_time": "0:07",
+                "end_time": "0:47",
+                "summary": "The S&P 500 closed down, showing limited price movement...",
+                "key_points": [
+                    "Key support at 4594",
+                    "Potential double top bearish pattern forming",
+                    "Break below support could lead to 4588"
+                ],
+                "overall_summary": "S&P 500 showing signs of weakness with potential bearish pattern"
+            }}
+
+            Important:
+            - Use the actual timestamps from the transcript
+            - Include all relevant stocks mentioned
+            - Make segments based on natural topic transitions
+            - Ensure all fields are present in each segment
             """
             
             # Call the model with tracing
-            @trace_llm_call("analyze_segment")
+            @trace_llm_call("analyze_transcript")
             def analyze():
-                # Generate content is synchronous, no need for await
                 return model.generate_content(prompt)
                 
             response = analyze()
             
             if not response or not response.text:
-                logger.error(f"Empty response from model for segment")
-                return {
-                    'category': 'general discussions',
-                    'stock': None,
-                    'summary': f"Error analyzing segment: Empty response from model",
-                    'include': False
-                }
+                logger.error(f"Empty response from model")
+                return []
             
             # Parse and validate the response
             try:
-                lines = response.text.strip().split('\n')
-                result = {
-                    'category': 'general discussions',  # default
-                    'stock': None,
-                    'summary': '',
-                    'include': False
-                }
+                # Try to parse the response as JSON
+                response_text = response.text.strip()
+                # Find the first [ and last ] to extract the JSON array
+                start = response_text.find('[')
+                end = response_text.rfind(']') + 1
+                if start == -1 or end == 0:
+                    raise ValueError("No JSON array found in response")
+                    
+                json_text = response_text[start:end]
+                segments = json.loads(json_text)
                 
-                for line in lines:
-                    line = line.strip().lower()
-                    if line.startswith('category:'):
-                        result['category'] = line.replace('category:', '').strip()
-                    elif line.startswith('stock:'):
-                        stock = line.replace('stock:', '').strip()
-                        result['stock'] = None if stock in ['none', 'n/a', ''] else stock
-                    elif line.startswith('summary:'):
-                        result['summary'] = line.replace('summary:', '').strip()
-                    elif line.startswith('include:'):
-                        result['include'] = 'true' in line.lower()
+                if not isinstance(segments, list):
+                    raise ValueError("Response is not a list of segments")
+                    
+                # Validate each segment has required fields
+                for segment in segments:
+                    required_fields = ['topic', 'stocks', 'start_time', 'end_time', 'summary', 'key_points', 'overall_summary']
+                    missing_fields = [field for field in required_fields if field not in segment]
+                    if missing_fields:
+                        raise ValueError(f"Segment missing required fields: {missing_fields}")
                 
-                if self.langtrace is not None:
-                    result['trace_id'] = parent_trace.trace_id if parent_trace else None
-                
-                return result
+                logger.info(f"Successfully parsed {len(segments)} segments")
+                return segments
                 
             except Exception as e:
                 logger.error(f"Failed to parse model response: {str(e)}")
-                return {
-                    'category': 'general discussions',
-                    'stock': None,
-                    'summary': f"Error analyzing segment: Failed to parse response: {str(e)}",
-                    'include': False
-                }
+                return []
                 
         except Exception as e:
-            logger.error(f"Error analyzing segment: {str(e)}")
-            return {
-                'category': 'general discussions',
-                'stock': None,
-                'summary': f"Error analyzing segment: {str(e)}",
-                'include': False
-            }
+            logger.error(f"Error analyzing transcript: {str(e)}")
+            return []
 
-    async def _analyze_frames(self, frames: List[str], category: str) -> Dict[str, Any]:
-        """Analyze frames to find the best stock chart representations"""
-        if category != 'stock analysis':
-            return {'frames': [], 'trace_id': None}
+    async def _upload_frame(self, frame_path: str) -> Optional[Any]:
+        """Upload a single frame to Gemini using file API"""
+        try:
+            file = genai.upload_file(frame_path, mime_type="image/jpeg")
+            logger.info(f"Uploaded frame '{file.display_name}' as: {file.uri}")
+            return file
+        except Exception as e:
+            logger.error(f"Failed to upload frame {frame_path}: {str(e)}")
+            return None
 
-        best_frames = []
-        frame_batches = [frames[i:i+4] for i in range(0, len(frames), 4)]  # Process 4 frames at a time
-        trace_id = None
-        
-        for batch in frame_batches:
-            # Wait for rate limit before making request
+    async def analyze_frames_batch(self, frames: List[str], retry_count: int = 0) -> List[Dict]:
+        """Upload and analyze a batch of frames with rate limit handling"""
+        try:
+            model = await self._get_video_analysis_model()
+            results = []
+            
+            for frame in frames:
+                try:
+                    image = await self._upload_frame(frame)
+                    
+                    prompt = """Analyze this frame from a stock market video.
+                    Extract and provide the following information in JSON format:
+                    1. Stock tickers visible (if any)
+                    2. Timeframe of the chart (if visible)
+                    3. Technical analysis elements:
+                       - Trendlines
+                       - Support/Resistance levels
+                       - Indicators visible
+                       - Pattern formations
+                    4. Graph visibility metrics:
+                       - Clarity (0-10)
+                       - Data completeness (0-10)
+                       - Text readability (0-10)
+                    5. Frame quality:
+                       - Resolution
+                       - Cropping/framing
+                       - Any overlays or obstructions
+                    
+                    Also provide an overall rank (0-10) based on information completeness and visual quality.
+                    """
+                    
+                    response = await model.generate_content([prompt, image])
+                    analysis = json.loads(response.text)
+                    
+                    results.append({
+                        'frame_path': frame,
+                        'analysis': analysis,
+                        'timestamp': float(frame.split('_')[1].split('.')[0])
+                    })
+                    
+                except Exception as e:
+                    if "429" in str(e) and retry_count < self.settings.rate_limit.max_retries:
+                        logger.warning(f"Rate limit hit, waiting {self.settings.rate_limit.retry_delay_seconds} seconds...")
+                        await asyncio.sleep(self.settings.rate_limit.retry_delay_seconds)
+                        # Retry this batch from the failed frame
+                        remaining_frames = frames[frames.index(frame):]
+                        retry_results = await self.analyze_frames_batch(remaining_frames, retry_count + 1)
+                        results.extend(retry_results)
+                        break
+                    else:
+                        logger.error(f"Error analyzing frame {frame}: {str(e)}")
+                        continue
+            
+            return results
+        except Exception as e:
+            logger.error(f"Failed to analyze frames batch: {str(e)}")
+            return []
+
+    async def analyze_frames_for_topics(self, video: Video, frames: List[str], transcript_analysis: Dict) -> Dict[str, List[Dict]]:
+        """Analyze all frames and select the best ones for each topic/ticker"""
+        try:
+            logger.info(f"Starting comprehensive frame analysis for video {video.id}")
+            
+            # Process frames in batches
+            all_frame_analyses = []
+            batch_size = self.settings.rate_limit.batch_size
+            
+            for i in range(0, len(frames), batch_size):
+                batch = frames[i:i + batch_size]
+                batch_results = await self.analyze_frames_batch(batch)
+                all_frame_analyses.extend(batch_results)
+            
+            # Group frames by stock tickers
+            ticker_frames = {}
+            for frame_analysis in all_frame_analyses:
+                tickers = frame_analysis['analysis'].get('stock_tickers', [])
+                for ticker in tickers:
+                    if ticker not in ticker_frames:
+                        ticker_frames[ticker] = []
+                    ticker_frames[ticker].append(frame_analysis)
+            
+            # For each topic in the transcript, select the best frames
+            topic_best_frames = {}
+            
+            for segment in transcript_analysis['segments']:
+                topic_key = f"{segment['topic']}_{','.join(segment['stocks'])}"
+                relevant_frames = []
+                
+                # Get frames within segment timeframe
+                start_time = segment['start_time']
+                end_time = segment['end_time']
+                
+                # Collect frames for all mentioned stocks in this segment
+                for stock in segment['stocks']:
+                    if stock in ticker_frames:
+                        stock_frames = ticker_frames[stock]
+                        # Filter frames by timestamp and sort by rank
+                        segment_frames = [
+                            frame for frame in stock_frames
+                            if start_time <= frame['timestamp'] <= end_time
+                        ]
+                        segment_frames.sort(key=lambda x: x['analysis']['overall_rank'], reverse=True)
+                        
+                        # Get up to 2 best frames with different timeframes
+                        selected_frames = []
+                        seen_timeframes = set()
+                        
+                        for frame in segment_frames:
+                            timeframe = frame['analysis'].get('timeframe')
+                            if timeframe and timeframe not in seen_timeframes and len(selected_frames) < 2:
+                                selected_frames.append(frame)
+                                seen_timeframes.add(timeframe)
+                        
+                        relevant_frames.extend(selected_frames)
+                
+                if relevant_frames:
+                    topic_best_frames[topic_key] = {
+                        'frames': relevant_frames,
+                        'topic': segment['topic'],
+                        'stocks': segment['stocks'],
+                        'timeframes': list(seen_timeframes),
+                        'segment_time': {
+                            'start': start_time,
+                            'end': end_time
+                        }
+                    }
+            
+            return topic_best_frames
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze frames for topics: {str(e)}")
+            return {}
+
+    async def _process_transcript(self, video: Video, raw_transcript: str) -> Dict[str, Any]:
+        """Process raw transcript to identify stock discussions and their sections"""
+        try:
             model_name = self.settings.model.video_analysis.name
             await self.model_manager._wait_for_rate_limit(model_name)
+            model = await self.model_manager._initialize_model(model_name)
             
-            # Load images
-            images = []
-            for frame_path in batch:
-                try:
-                    img = Image.open(frame_path)
-                    images.append(img)
-                except Exception as e:
-                    logger.error(f"Failed to load image {frame_path}: {str(e)}")
-                    continue
-
-            if not images:
-                continue
-
-            prompt = """Analyze these stock chart images and rank them based on:
-            1. Presence of technical analysis indicators
-            2. Clarity of trend lines and patterns
-            3. Timeframe visibility (daily, weekly, etc.)
-            4. Overall information density
+            prompt = f"""
+            instructions:
+            You are an expert financial content analyzer. 
+            Analyze this video transcript about stock market analysis and trading.
+            Break down the content into sections. Each section must be organized into one of the following topics:
+            stock analysis, general discussion, market news, market context, trading context.
+            For each topic, provide a concise but informative summary of the key points.
+            When the topic is "stock analysis", include the specific stock ticker/name and any relevant market data or metrics mentioned.
+            Note any significant trends or patterns discussed.
+            Break down the content by stock tickers discussed and provide detailed analysis for each.
             
-            Select the best 1-2 frames that show different timeframes or complementary analysis.
-            Respond with ONLY the indices (0-based) of the best frames, separated by commas.
-            Example: "0,2" means the 1st and 3rd frames are best.
+               - Provide a dedicated section for each stock/ticker discussed.
+               - Provide a dedicated section for each topic.
+                When you have identified a non relevant discussion, comercial, advertising, general discussion, do not include it in your analysis.
+
+            Transcript:
+            {raw_transcript}
+
+            Output the data in a valid json format with the following structure:
+            {{
+                "Date": "",
+                "sections": [
+                    {{
+                        "topic": "",
+                        "stocks": [],
+                        "start_time": 0,
+                        "end_time": 10,
+                        "summary": "Summary of the stock analysis section",
+                        "key_points": ["Point 1", "Point 2"],
+                        "overall_summary": "Overall summary of the stock analysis section"
+                    }}
+                ],
+            }}
+
             """
-            
+
+            if self.langtrace is not None:
+                @trace_llm_call("process_transcript")
+                def analyze():
+                    return model.generate_content(prompt)
+                response = analyze()
+            else:
+                response = model.generate_content(prompt)
+
             try:
-                model = await self.model_manager._initialize_model(model_name)
+                # Extract JSON content from response
+                text = response.text.strip()
+                # Find the first { and last } to extract JSON
+                start = text.find('{')
+                end = text.rfind('}') + 1
                 
-                # Analyze frames with tracing
-                if self.langtrace is not None:
-                    @trace_llm_call("analyze_frames")
-                    async def analyze_frames():
-                        return model.generate_content([prompt, *images])
-                    response = await analyze_frames()
+                if start >= 0 and end > start:
+                    json_str = text[start:end]
+                    # Attempt to parse JSON to validate it
+                    parsed_response = json.loads(json_str)
+                    
+                    # Save the properly formatted JSON
+                    raw_response_path = self.summaries_dir / f"{video.id}_raw_llm.json"
+                    with open(raw_response_path, 'w') as f:
+                        json.dump(parsed_response, f, indent=2)
+                    logger.info(f"Saved formatted JSON response to {raw_response_path}")
+                    
+                    return {
+                        "raw_response": parsed_response.get("overall_summary", ""),
+                        "stocks": parsed_response.get("sections", []),
+                        "analysis_json": parsed_response  # Include the full parsed JSON
+                    }
                 else:
-                    response = model.generate_content([prompt, *images])
+                    logger.error("No JSON content found in response")
+                    # Save the raw text for debugging
+                    raw_response_path = self.summaries_dir / f"{video.id}_raw_llm.txt"
+                    with open(raw_response_path, 'w') as f:
+                        f.write(text)
+                    logger.error(f"Saved problematic response to {raw_response_path}")
+                    return {"raw_response": text, "stocks": [], "analysis_json": {}}
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse as JSON: {str(e)}")
+                # Save the raw text for debugging
+                raw_response_path = self.summaries_dir / f"{video.id}_raw_llm.txt"
+                with open(raw_response_path, 'w') as f:
+                    f.write(text)
+                logger.error(f"Saved problematic response to {raw_response_path}")
+                return {"raw_response": response.text, "stocks": [], "analysis_json": {}}
                 
-                frame_indices = response.text.strip().split(',')
-                
-                # Add selected frames to best_frames
-                for idx in frame_indices:
-                    try:
-                        idx = int(idx)
-                        if 0 <= idx < len(batch):
-                            best_frames.append(batch[idx])
-                            if len(best_frames) >= 2:  # Don't select more than 2 frames
-                                return {'frames': best_frames, 'trace_id': trace_id}
-                    except ValueError:
-                        continue
-                        
-            except Exception as e:
-                logger.error(f"Failed to analyze frames: {str(e)}")
-                continue
+        except Exception as e:
+            logger.error(f"Failed to process transcript: {str(e)}", exc_info=True)
+            return {"raw_response": "", "stocks": [], "analysis_json": {}}
 
-        return {'frames': best_frames[:2], 'trace_id': trace_id}  # Return at most 2 frames
-
-    async def analyze_video_content(self, video: Video) -> List[Dict[str, Any]]:
+    async def analyze_video_content(self, video: Video) -> Dict[str, Any]:
         """Analyze video content and generate structured summaries"""
         try:
-            # Load frame mapping which contains both transcript and frame information
-            mapping_path = self.transcript_dir / f"{video.id}_frame_mapping.json"
+            logger.info(f"Starting content analysis for video {video.id}")
             
-            if not mapping_path.exists():
-                raise FileNotFoundError(f"Frame mapping file not found: {mapping_path}")
+            # Build full transcript text with timestamps
+            full_transcript = []
+            for segment in video.transcript:
+                timestamp = f"[{str(timedelta(seconds=int(segment.start_time)))}]"
+                full_transcript.append(f"{timestamp} {segment.text}")
             
-            logger.info(f"Loading frame mapping from {mapping_path}")
-            with open(mapping_path) as f:
-                frame_mapping = json.load(f)
+            full_transcript_text = " ".join(full_transcript)
+            logger.info(f"Processing full transcript of length {len(full_transcript_text)}")
             
-            logger.info(f"Loaded frame mapping with {len(frame_mapping.get('mapping', []))} mapped segments")
-
-            # Use LangTrace for overall analysis if enabled
-            if self.langtrace is not None:
-                @trace_llm_call("analyze_video_content")
-                async def analyze_with_trace():
-                    return await self._process_segments(video, frame_mapping)
-                summaries = await analyze_with_trace()
-            else:
-                summaries = await self._process_segments(video, frame_mapping)
-
-            logger.info(f"Generated {len(summaries)} content summaries")
-            return summaries
-
+            # Process the transcript and get analysis
+            analysis = await self._process_transcript(video, full_transcript_text)
+            
+            # Save the analysis JSON and generate frames report
+            if 'analysis_json' in analysis:
+                output_path = await self._save_combined_analysis(video, analysis['analysis_json'])
+                logger.info(f"Saved combined analysis to {output_path}")
+        
+            return analysis
+            
         except Exception as e:
-            logger.error(f"Failed to analyze video content: {str(e)}", exc_info=True)
+            logger.error(f"Failed to analyze video content: {str(e)}")
             raise
 
-    async def _process_segments(self, video: Video, frame_mapping: Dict, parent_trace=None) -> List[Dict[str, Any]]:
-        """Process video segments and generate summaries"""
-        summaries = []
-        current_block = {
-            "category": None,
-            "stock": None,
-            "text": "",
-            "frames": [],
-            "start_time": None,
-            "end_time": None,
-            "trace_ids": []
-        }
-
-        for segment in frame_mapping.get('mapping', []):
-            if not segment.get('transcript'):
-                continue
-
-            # Analyze the segment with LangTrace context
-            if self.langtrace is not None:
-                @trace_llm_call("analyze_segment")
-                async def analyze_segment():
-                    return await self._analyze_transcript_segment(segment['transcript'], parent_trace)
-                analysis = await analyze_segment()
-            else:
-                analysis = await self._analyze_transcript_segment(segment['transcript'])
-
-            if analysis['include']:
-                if current_block["category"] is None:
-                    current_block.update({
-                        "category": analysis["category"],
-                        "stock": analysis["stock"],
-                        "text": segment["transcript"],
-                        "frames": segment.get("frames", []),
-                        "start_time": segment["start_time"],
-                        "end_time": segment["end_time"]
-                    })
-                elif current_block["category"] == analysis["category"] and current_block["stock"] == analysis["stock"]:
-                    current_block["text"] += "\n" + segment["transcript"]
-                    current_block["frames"].extend(segment.get("frames", []))
-                    current_block["end_time"] = segment["end_time"]
-                else:
-                    # Process current block and start new one
-                    if current_block["text"]:
-                        summary = await self._process_block(video, current_block, parent_trace)
-                        if summary:
-                            summaries.append(summary)
-
-                    current_block = {
-                        "category": analysis["category"],
-                        "stock": analysis["stock"],
-                        "text": segment["transcript"],
-                        "frames": segment.get("frames", []),
-                        "start_time": segment["start_time"],
-                        "end_time": segment["end_time"],
-                        "trace_ids": [analysis.get('trace_id')] if self.langtrace is not None else []
-                    }
-
-        # Process final block
-        if current_block["text"]:
-            summary = await self._process_block(video, current_block, parent_trace)
-            if summary:
-                summaries.append(summary)
-
-        return summaries
-
-    async def _process_block(self, video: Video, block: Dict, parent_trace=None) -> Optional[Dict[str, Any]]:
-        """Process a content block and generate summary"""
+    async def _save_combined_analysis(self, video: Video, analysis: Dict[str, Any]) -> str:
+        """Save all analysis data in a single JSON file and generate frames report"""
         try:
-            # Use video analysis model for generating summary
-            model_name = self.settings.model.video_analysis.name
-            await self.model_manager._wait_for_rate_limit(model_name)
-            
-            # Analyze frames if present
-            frame_analysis = await self._analyze_frames(block["frames"], block["category"])
-            
-            # Generate summary prompt
-            prompt = f"""Generate a detailed summary for this video segment about {block['category']}.
-            
-            Content: {block['text']}
-            
-            Format the response as:
-            category: {block['category']}
-            stock: {block['stock'] if block['stock'] else 'none'}
-            start_time: {block['start_time']}
-            end_time: {block['end_time']}
-            key_points: [list 3-5 main points]
-            summary: [2-3 sentences summarizing the content]
-            """
-            
-            # Get langtrace instance
-            langtrace_client = self.langtrace
-            
-            # Generate summary with tracing
-            if langtrace_client is not None:
-                @trace_llm_call("generate_summary")
-                async def generate_summary():
-                    model = await self.model_manager._initialize_model(model_name)
-                    return model.generate_content(prompt)
-                response = await generate_summary()
-            else:
-                model = await self.model_manager._initialize_model(model_name)
-                response = model.generate_content(prompt)
-            
-            if not response or not response.text:
-                logger.error("Empty response from model for summary generation")
-                return None
-            
-            # Parse the response into a structured format
-            summary = self._parse_summary_response(response.text)
-            if not summary:
-                logger.error("Failed to parse summary response")
-                return None
+            output_path = self.summaries_dir / f"{video.id}_analysis.json"
             
             # Add metadata
-            summary.update({
-                "frames": frame_analysis.get("frames", []),
-                "trace_ids": block.get("trace_ids", [])
-            })
+            final_analysis = {
+                "metadata": {
+                    "video_id": video.id,
+                    "title": video.metadata.title if video.metadata.title else video.id,
+                    "url": str(video.url),
+                    "duration": video.metadata.duration if video.metadata else None,
+                    "analysis_timestamp": datetime.now().isoformat()
+                }
+            }
             
-            # Save summary to file
-            start_time_str = str(block['start_time']).replace(":", "-")  # Make filename safe
-            summary_file = self.summaries_dir / f"{video.id}_{start_time_str}.json"
-            try:
-                with open(summary_file, 'w', encoding='utf-8') as f:
-                    json.dump(summary, f, ensure_ascii=False, indent=2)
-                logger.info(f"Saved summary to {summary_file}")
-            except Exception as e:
-                logger.error(f"Failed to save summary file: {str(e)}")
-                # Continue even if save fails - we still want to return the summary
+            # Add the analyses
+            final_analysis.update(analysis)
             
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Error processing block: {str(e)}", exc_info=True)  # Add stack trace
-            return None
+            with open(output_path, 'w') as f:
+                json.dump(final_analysis, f, indent=2)
+                
+            logger.info(f"Saved analysis to {output_path}")
 
-    def _parse_summary_response(self, response_text: str) -> Optional[Dict[str, Any]]:
-        """Parse the model's response into a structured format"""
-        try:
-            lines = response_text.strip().split('\n')
-            summary = {}
-            current_key = None
-            current_value = []
+            # Generate frames report after saving analysis
+            try:
+                logger.info(f"Attempting to generate frames report for video {video.id}")
+                logger.debug(f"Video analysis state: {video.analysis if hasattr(video, 'analysis') else 'No analysis'}")
+                logger.debug(f"Video key frames: {video.analysis.key_frames if hasattr(video, 'analysis') and hasattr(video.analysis, 'key_frames') else 'No key_frames'}")
+                
+                report_path = self.report_generator.generate_frames_report(video)
+                logger.info(f"Successfully generated frames report at {report_path}")
+            except Exception as e:
+                logger.error(f"Failed to generate frames report: {str(e)}", exc_info=True)
             
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                if ':' in line:
-                    # If we have a previous key, add it to the summary
-                    if current_key and current_value:
-                        summary[current_key] = '\n'.join(current_value).strip()
-                        current_value = []
-                    
-                    # Start new key
-                    key, value = line.split(':', 1)
-                    current_key = key.strip().lower()
-                    value = value.strip()
-                    if value:
-                        current_value.append(value)
-                else:
-                    # Continue previous value
-                    if current_key:
-                        current_value.append(line)
-            
-            # Add the last key-value pair
-            if current_key and current_value:
-                summary[current_key] = '\n'.join(current_value).strip()
-            
-            return summary
+            return str(output_path)
             
         except Exception as e:
-            logger.error(f"Error parsing summary response: {str(e)}")
-            return None
+            logger.error(f"Failed to save analysis: {str(e)}")
+            raise
+
+    def _create_default_analysis(self, block: Dict) -> Dict[str, Any]:
+        """Create a default analysis when the model fails to generate a valid one"""
+        return {
+            "topic": block.get("topic", "general discussion"),
+            "stocks": block.get("stocks", ["unknown"]),
+            "summary": "Default analysis of market conditions",
+            "key_points": [
+                "Market conditions",
+                "Trading considerations",
+                "Technical patterns",
+                "Price levels"
+            ],
+            "overall_summary": "Analysis of market conditions and trading opportunities",
+            "frames": []
+        }

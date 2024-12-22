@@ -146,10 +146,10 @@ async def analyze_youtube_video(request: YouTubeRequest, background_tasks: Backg
         video_id = str(uuid.uuid4())
         logger.info(f"Generated video ID: {video_id}")
         
-        # Create video object with string URL
+        # Create video object with HttpUrl object
         video = Video(
             id=video_id,
-            url=str(request.url),
+            url=request.url,  # Pass the HttpUrl object directly
             source=VideoSource.YOUTUBE
         )
         logger.info(f"Created video object for {video_id}")
@@ -161,7 +161,8 @@ async def analyze_youtube_video(request: YouTubeRequest, background_tasks: Backg
             "progress": {
                 "downloading": 0,
                 "transcribing": 0,
-                "analyzing": 0
+                "analyzing": 0,
+                "extracting_frames": 0  # Add missing progress field
             }
         }
         
