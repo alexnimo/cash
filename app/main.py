@@ -1,16 +1,19 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
+import os
+import json
+import uuid
+import logging
+from typing import Dict, Any, Optional, List
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-import uuid
-from typing import Optional, List, Dict
-from pydantic import BaseModel, HttpUrl
+from fastapi.templating import Jinja2Templates
 import asyncio
-import logging
-import os
+from pydantic import BaseModel, HttpUrl
 
 from app.models.video import Video, VideoSource, VideoStatus
 from app.services.video_processor import VideoProcessor
+from app.services.content_analyzer import ContentAnalyzer
 from app.services.llm_service import LLMService
 from app.services.vector_store import get_vector_store
 from app.services.model_manager import ModelManager
@@ -21,9 +24,10 @@ from app.utils.langtrace_utils import init_langtrace, get_langtrace
 
 # Configure logging at the root level
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
@@ -46,20 +50,55 @@ app = FastAPI(title=settings.app_name)
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your actual domains
+    allow_origins=["*"],  # For development only
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Get the absolute path to the static directory
+static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "static")
+logger.info(f"Static directory path: {static_dir}")
+
+# Verify directory exists
+if not os.path.exists(static_dir):
+    raise RuntimeError(f"Static directory not found at: {static_dir}")
+
 # Mount static files
-static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+# Create temp directory at startup
+temp_dir = os.path.join("temp")
+os.makedirs(temp_dir, exist_ok=True)
+logger.info(f"Created temp directory at: {temp_dir}")
+
+# Test route to verify server is working
+@app.get("/api/test/ping")
+async def test_ping():
+    return {"status": "ok", "message": "Server is running"}
+
+# Test page route
+@app.get("/test")
+async def test_page():
+    """Serve the test page"""
+    test_page_path = os.path.join(static_dir, "test.html")
+    logger.info(f"Serving test.html from {test_page_path}")
+    
+    if not os.path.exists(test_page_path):
+        logger.error(f"Test page not found at: {test_page_path}")
+        raise HTTPException(status_code=404, detail="Test page not found")
+        
+    return FileResponse(test_page_path)
 
 # Root route to serve index.html
 @app.get("/")
 async def root():
-    return FileResponse(os.path.join(static_dir, "index.html"))
+    index_page_path = os.path.join(static_dir, "index.html")
+    if not os.path.exists(index_page_path):
+        logger.error(f"Index page not found at: {index_page_path}")
+        raise HTTPException(status_code=404, detail="Index page not found")
+        
+    return FileResponse(index_page_path)
 
 # Health check endpoint
 @app.get("/health")
@@ -85,6 +124,7 @@ video_status: Dict[str, Dict] = {}
 _video_processor = None
 _llm_service = None
 _vector_store = None
+_content_analyzer = None
 
 def get_video_processor():
     global _video_processor
@@ -103,6 +143,12 @@ def get_vector_store_service():
     if _vector_store is None:
         _vector_store = get_vector_store()
     return _vector_store
+
+def get_content_analyzer():
+    global _content_analyzer
+    if _content_analyzer is None:
+        _content_analyzer = ContentAnalyzer()
+    return _content_analyzer
 
 async def process_video_background(video: Video):
     """Background task to process video"""
@@ -258,6 +304,112 @@ async def check_quota():
     except Exception as e:
         logger.error(f"Failed to check quota: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/test/analyze-pdf")
+async def test_pdf_analysis(
+    pdf_file: UploadFile = File(...),
+    json_file: UploadFile = File(...),
+    split_pdf: bool = Form(False)  # New parameter to control splitting
+):
+    """Test endpoint to analyze a PDF file with frames using an existing JSON summary."""
+    logger.info(f"Received analysis request - PDF: {pdf_file.filename}, JSON: {json_file.filename}, Split: {split_pdf}")
+    
+    try:
+        # Save uploaded files temporarily
+        temp_dir = os.path.join("temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        pdf_path = os.path.join(temp_dir, f"temp_{uuid.uuid4()}.pdf")
+        json_path = os.path.join(temp_dir, f"temp_{uuid.uuid4()}.json")
+        
+        logger.info(f"Saving files to temp directory: {temp_dir}")
+        
+        try:
+            # Save files
+            with open(pdf_path, "wb") as f:
+                content = await pdf_file.read()
+                f.write(content)
+                logger.info(f"Saved PDF file ({len(content)} bytes)")
+            
+            with open(json_path, "wb") as f:
+                content = await json_file.read()
+                f.write(content)
+                logger.info(f"Saved JSON file ({len(content)} bytes)")
+            
+            # Read JSON content
+            with open(json_path, "r") as f:
+                json_content = json.load(f)
+                logger.info("Successfully loaded JSON content")
+            
+            # Create a minimal Video object for the analysis
+            video = Video(
+                id=str(uuid.uuid4()),
+                source=VideoSource.TEST,
+                status=VideoStatus.PROCESSING
+            )
+            
+            # Get content analyzer
+            analyzer = get_content_analyzer()
+            
+            if split_pdf:
+                # Use the new split PDF functionality
+                logger.info("Using split PDF mode")
+                result = await analyzer._analyze_frames_and_update_summary(
+                    video=video,
+                    frames_pdf_path=pdf_path,
+                    summary_json_path=json_path
+                )
+            else:
+                # Use direct file upload for smaller files
+                logger.info("Using single file mode")
+                try:
+                    with open(pdf_path, 'rb') as f:
+                        pdf_file = genai.upload_file(f, mime_type="application/pdf")
+                    
+                    logger.info(f"Successfully uploaded PDF file: {pdf_file.name}")
+                    
+                    model = await analyzer._get_video_analysis_model()
+                    logger.info("Got video analysis model")
+                    
+                    # Create parts with correct schema
+                    prompt = analyzer._get_frame_analysis_prompt(json_content)
+                    logger.info("Generated analysis prompt")
+                    
+                    parts = [
+                        {"text": prompt},
+                        {"file_data": pdf_file}
+                    ]
+                    
+                    # Generate content
+                    logger.info("Generating content with Gemini...")
+                    response = model.generate_content(contents=parts)
+                    logger.info("Received response from Gemini")
+                    
+                    result = json.loads(response.text)
+                    logger.info("Successfully parsed response JSON")
+                    
+                except Exception as e:
+                    logger.error(f"Error in single file mode: {str(e)}", exc_info=True)
+                    raise
+            
+            logger.info("Analysis completed successfully")
+            return JSONResponse(content={"result": result})
+            
+        finally:
+            # Clean up temporary files
+            try:
+                for temp_file in [pdf_path, json_path]:
+                    if os.path.exists(temp_file):
+                        os.chmod(temp_file, 0o666)  # Give write permission
+                        os.remove(temp_file)
+                logger.info("Cleaned up temporary files")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary files: {str(e)}")
+                
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error in PDF analysis test: {error_msg}", exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 if __name__ == "__main__":
     import uvicorn

@@ -37,7 +37,10 @@ class ReportGenerator:
     def get_frame_metadata(self, frame_path: str) -> dict:
         """Extract metadata from a frame."""
         try:
-            frame_name = Path(frame_path).name
+            frame_path = Path(frame_path)
+            frame_name = frame_path.name
+            abs_path = frame_path.resolve()
+            
             with PILImage.open(frame_path) as img:
                 width, height = img.size
                 # Extract timestamp from frame filename (e.g., frame_0010.jpg -> 10 seconds)
@@ -46,7 +49,7 @@ class ReportGenerator:
                     "Frame Name": frame_name,
                     "Timestamp": f"{timestamp} seconds",
                     "Resolution": f"{width}x{height}",
-                    "File Path": frame_path,
+                    "File Path": str(abs_path),
                     "File Size": f"{os.path.getsize(frame_path) / 1024:.2f} KB"
                 }
         except Exception as e:
