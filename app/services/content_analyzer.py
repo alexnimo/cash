@@ -4,6 +4,7 @@ import asyncio
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
 from datetime import datetime, timedelta
 from app.core.config import get_settings
 from app.models.video import Video, VideoStatus
@@ -11,6 +12,11 @@ from app.services.model_manager import ModelManager
 from app.services.report_generator import ReportGenerator
 from app.utils.langtrace_utils import get_langtrace, trace_llm_call, init_langtrace
 from PIL import Image
+import os
+import base64
+import PyPDF2
+import math
+import tempfile
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -57,10 +63,12 @@ class ContentAnalyzer:
         logger.info(f"Initialized ContentAnalyzer with summaries_dir: {self.summaries_dir}")
         logger.info(f"Initialized ContentAnalyzer with reports_dir: {self.reports_dir}")
         
-        # Get langtrace instance
+        # Initialize langtrace
+        init_langtrace()
         self.langtrace = get_langtrace()
         if self.langtrace:
             logger.info("LangTrace is available for tracing")
+            logger.info(f"Initialized with dirs: transcript_dir={self.transcript_dir}, raw_transcript_dir={self.raw_transcript_dir}, summaries_dir={self.summaries_dir}, reports_dir={self.reports_dir}")
         else:
             logger.warning("LangTrace is not available, tracing will be disabled")
 
@@ -132,12 +140,18 @@ class ContentAnalyzer:
             - Ensure all fields are present in each segment
             """
             
-            # Call the model with tracing
-            @trace_llm_call("analyze_transcript")
-            def analyze():
-                return model.generate_content(prompt)
-                
-            response = analyze()
+            if self.langtrace is not None:
+                @trace_llm_call("analyze_transcript")
+                def analyze():
+                    return model.generate_content(prompt)
+                response = analyze()
+            else:
+                response = model.generate_content(prompt)
+            
+            if self.langtrace is not None:
+                with self.langtrace.start_span("analyze_transcript_response") as span:
+                    span.set_attribute("response_length", len(response.text))
+                    span.set_attribute("response_preview", response.text[:200])
             
             if not response or not response.text:
                 logger.error(f"Empty response from model")
@@ -218,7 +232,14 @@ class ContentAnalyzer:
                     Also provide an overall rank (0-10) based on information completeness and visual quality.
                     """
                     
-                    response = await model.generate_content([prompt, image])
+                    if self.langtrace is not None:
+                        @trace_llm_call("analyze_frame")
+                        def analyze():
+                            return model.generate_content(prompt, image)
+                        response = analyze()
+                    else:
+                        response = model.generate_content(prompt, image)
+                    
                     analysis = json.loads(response.text)
                     
                     results.append({
@@ -320,101 +341,400 @@ class ContentAnalyzer:
             logger.error(f"Failed to analyze frames for topics: {str(e)}")
             return {}
 
+    async def _split_pdf_and_upload(self, pdf_path: str, max_size_mb: int = 35) -> List[Any]:
+        """Split a PDF into chunks of max_size_mb and upload each chunk to Gemini."""
+        max_size_bytes = max_size_mb * 1024 * 1024
+        uploaded_files = []
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        # Get total PDF size
+        pdf_size = os.path.getsize(pdf_path)
+        num_chunks = math.ceil(pdf_size / max_size_bytes)
+        
+        logger.info(f"Splitting PDF of size {pdf_size / (1024*1024):.2f}MB into {num_chunks} chunks")
+        
+        # Open the source PDF
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            total_pages = len(reader.pages)
+            pages_per_chunk = math.ceil(total_pages / num_chunks)
+            
+            logger.info(f"Total pages: {total_pages}, Pages per chunk: {pages_per_chunk}")
+            
+            # Create chunks
+            for chunk_num in range(num_chunks):
+                start_page = chunk_num * pages_per_chunk
+                end_page = min((chunk_num + 1) * pages_per_chunk, total_pages)
+                
+                # Create a new PDF writer
+                writer = PyPDF2.PdfWriter()
+                
+                # Add pages to the writer
+                for page_num in range(start_page, end_page):
+                    writer.add_page(reader.pages[page_num])
+                
+                # Save the chunk to a temporary file
+                with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
+                    writer.write(temp_file)
+                    temp_path = temp_file.name
+                
+                uploaded = False
+                retries = 0
+                last_error = None
+                
+                while not uploaded and retries < max_retries:
+                    try:
+                        # Upload the chunk
+                        logger.info(f"Uploading chunk {chunk_num + 1}/{num_chunks} (pages {start_page + 1}-{end_page}), attempt {retries + 1}/{max_retries}")
+                        with open(temp_path, 'rb') as f:
+                            uploaded_file = genai.upload_file(f, mime_type="application/pdf")
+                            uploaded_files.append(uploaded_file)
+                            logger.info(f"Successfully uploaded chunk {chunk_num + 1}/{num_chunks}")
+                            uploaded = True
+                            
+                            # Verify the upload by checking the file URI
+                            if not hasattr(uploaded_file, 'uri') or not uploaded_file.uri:
+                                raise ValueError("Upload verification failed: missing file URI")
+                            
+                    except Exception as e:
+                        last_error = e
+                        retries += 1
+                        if retries < max_retries:
+                            logger.warning(f"Upload attempt {retries} failed for chunk {chunk_num + 1}: {str(e)}")
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            logger.error(f"Failed to upload chunk {chunk_num + 1} after {max_retries} attempts: {str(e)}")
+                            raise Exception(f"Failed to upload chunk {chunk_num + 1}: {str(last_error)}")
+                    
+                    finally:
+                        # Clean up temporary file
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                
+                # Add a small delay between chunks to avoid rate limits
+                if chunk_num < num_chunks - 1:  # Don't delay after the last chunk
+                    await asyncio.sleep(2)
+        
+        # Verify all chunks were uploaded
+        if len(uploaded_files) != num_chunks:
+            raise Exception(f"Upload verification failed: Expected {num_chunks} chunks but got {len(uploaded_files)}")
+        
+        logger.info(f"Successfully uploaded all {num_chunks} chunks")
+        return uploaded_files
+
+    @trace_llm_call("analyze_frames")
+    async def _analyze_frames_and_update_summary(self, video: Video, frames_pdf_path: str, summary_json_path: str) -> Dict[str, Any]:
+        """Analyze frames from PDF and update summary with best frames for each section."""
+        try:
+            # Get the model
+            model = await self._get_video_analysis_model()
+            
+            # Load the summary
+            with open(summary_json_path, 'r') as f:
+                summary = json.load(f)
+            
+            try:
+                # Split and upload PDF files
+                pdf_files = await self._split_pdf_and_upload(frames_pdf_path)
+                logger.info(f"Successfully uploaded {len(pdf_files)} PDF chunks")
+                
+                # Create parts with all PDF files
+                prompt = f"""
+                You are an expert financial content analyzer. 
+                Your task is to analyze frames from a financial video that have been split into {len(pdf_files)} PDF chunks.
+                Each chunk contains a portion of the frames from the video.
+                
+                Instructions for frame analysis:
+                1. For each frame in ALL PDF chunks:
+                   - Look for stock chart graphs and analyze:
+                     * Stock tickers visible in the chart
+                     * Timeframe of the chart (daily, weekly, etc.)
+                     * Technical analysis elements (trendlines, support/resistance, etc.)
+                     * Visual quality and readability
+                   - Record the full path of the frame from the PDF metadata
+                   - Assign a quality score (0-10) based on clarity and information
+                
+                2. For each section in the summary:
+                   - If the section discusses specific stocks:
+                     * Find frames showing those exact stocks
+                     * For each stock, select the highest quality frame
+                     * Add the FULL FRAME PATHS to the section's frame_paths list
+                   - If no specific stocks discussed, leave frame_paths as empty list
+                
+                3. CRITICAL: You MUST use the exact frame paths as shown in the PDF metadata.
+                   DO NOT modify, shorten, or create new paths.
+                
+                4. Return your analysis in this exact JSON format:
+                {{
+                    "sections": [
+                        {{
+                            "topic": str,  # One of: "stock analysis", "general discussion", "market news", "market context", "trading context"
+                            "stocks": [str],  # List of stock tickers
+                            "start_time": float,
+                            "end_time": float,
+                            "summary": str,
+                            "key_points": [str],
+                            "overall_summary": str,
+                            "frame_paths": [str]  # List of full paths to frames that best match this section
+                        }}
+                    ]
+                }}
+                
+                Here is the existing summary to update with frames:
+                {json.dumps(summary, indent=2)}
+                
+                Analyze ALL frames from ALL PDF chunks and return the complete updated summary following the schema above.
+                Each section MUST have all fields from the original summary plus the frame_paths list.
+                """
+                
+                parts = [{"text": prompt}]
+                for pdf_file in pdf_files:
+                    parts.append({"file_data": pdf_file})
+                
+                # Wait for rate limit before proceeding
+                model_name = self.settings.model.transcription.name
+                await self.model_manager._wait_for_rate_limit(model_name)
+                
+                try:
+                    logger.info("Starting frame analysis with all PDF chunks...")
+                    # Generate content with all parts
+                    response = await asyncio.to_thread(
+                        model.generate_content,
+                        contents=parts,
+                        generation_config={
+                            'temperature': 0.1,
+                            'top_p': 0.1,
+                            'top_k': 1,
+                            'max_output_tokens': 8192  # Ensure we have enough tokens for the response
+                        }
+                    )
+                    logger.info("Frame analysis completed successfully")
+                    
+                    # Log raw response for debugging
+                    response_text = response.text.strip()
+                    logger.info(f"Raw frames analysis response: {response_text[:500]}...")
+                    
+                    # Try to parse the JSON response
+                    try:
+                        updated_summary = json.loads(response_text)
+                    except json.JSONDecodeError:
+                        import re
+                        json_match = re.search(r'\{[\s\S]*\}', response_text)
+                        if json_match:
+                            json_str = json_match.group()
+                            updated_summary = json.loads(json_str)
+                        else:
+                            error_msg = "No valid JSON found in frames analysis response"
+                            logger.error(f"{error_msg}. Raw response: {response_text}")
+                            raise ValueError(error_msg)
+                    
+                    # Validate the updated summary structure
+                    if 'sections' not in updated_summary:
+                        error_msg = "Updated summary missing required 'sections' field"
+                        logger.error(f"{error_msg}. Keys found: {list(updated_summary.keys())}")
+                        raise ValueError(error_msg)
+                    
+                    # Validate each section has the required fields including frame_paths
+                    for section in updated_summary['sections']:
+                        required_fields = ['topic', 'stocks', 'start_time', 'end_time', 
+                                         'summary', 'key_points', 'overall_summary', 'frame_paths']
+                        missing_fields = [field for field in required_fields if field not in section]
+                        if missing_fields:
+                            error_msg = f"Section missing required fields: {missing_fields}"
+                            logger.error(f"{error_msg}. Section: {section}")
+                            raise ValueError(error_msg)
+                        
+                        if not isinstance(section['frame_paths'], list):
+                            error_msg = "frame_paths must be a list"
+                            logger.error(f"{error_msg}. Type found: {type(section['frame_paths']).__name__}")
+                            raise ValueError(error_msg)
+                        
+                        # Validate frame paths exist
+                        for frame_path in section['frame_paths']:
+                            if not os.path.exists(frame_path):
+                                logger.warning(f"Frame path does not exist: {frame_path}")
+                    
+                    # Log frame analysis results
+                    sections_count = len(updated_summary.get('sections', []))
+                    total_frames = sum(len(s.get('frame_paths', [])) for s in updated_summary.get('sections', []))
+                    sections_with_frames = sum(1 for s in updated_summary.get('sections', []) if s.get('frame_paths', []))
+                    logger.info(f"Frame analysis results: {sections_count} sections, {total_frames} total frames, {sections_with_frames} sections with frames")
+                    
+                    # Save the updated summary
+                    output_path = self.summaries_dir / f"{video.id}_analysis_with_frames.json"
+                    with open(output_path, 'w', encoding='utf-8') as f:
+                        json.dump(updated_summary, f, indent=2)
+                    
+                    logger.info(f"Saved updated summary with frames to {output_path}")
+                    return updated_summary
+                    
+                except Exception as e:
+                    if "429" in str(e):  # Rate limit error
+                        logger.warning(f"Rate limit hit during frame analysis: {str(e)}")
+                        await asyncio.sleep(self.settings.rate_limit.retry_delay_seconds)
+                        # Return original summary and let the caller retry if needed
+                        return summary
+                    else:
+                        logger.error(f"Failed to process frames analysis response: {str(e)}", exc_info=True)
+                        return summary
+                    
+            except Exception as e:
+                logger.error(f"Failed to analyze frames and update summary: {str(e)}", exc_info=True)
+                return summary
+
+        except Exception as e:
+            logger.error(f"Failed to analyze frames and update summary: {str(e)}")
+            return summary
+
     async def _process_transcript(self, video: Video, raw_transcript: str) -> Dict[str, Any]:
         """Process raw transcript to identify stock discussions and their sections"""
         try:
-            model_name = self.settings.model.video_analysis.name
-            await self.model_manager._wait_for_rate_limit(model_name)
-            model = await self.model_manager._initialize_model(model_name)
+            model = await self._get_video_analysis_model()
             
+            # Define the schema in the prompt
             prompt = f"""
-            instructions:
             You are an expert financial content analyzer. 
-            Analyze this video transcript about stock market analysis and trading.
-            Break down the content into sections. Each section must be organized into one of the following topics:
-            stock analysis, general discussion, market news, market context, trading context.
-            For each topic, provide a concise but informative summary of the key points.
-            When the topic is "stock analysis", include the specific stock ticker/name and any relevant market data or metrics mentioned.
-            Note any significant trends or patterns discussed.
-            Break down the content by stock tickers discussed and provide detailed analysis for each.
+            Your task is to analyze this video transcript about stock market analysis and trading.
             
-               - Provide a dedicated section for each stock/ticker discussed.
-               - Provide a dedicated section for each topic.
-                When you have identified a non relevant discussion, comercial, advertising, general discussion, do not include it in your analysis.
-
-            Transcript:
-            {raw_transcript}
-
-            Output the data in a valid json format with the following structure:
-            {{
-                "Date": "",
-                "sections": [
-                    {{
-                        "topic": "",
-                        "stocks": [],
-                        "start_time": 0,
-                        "end_time": 10,
-                        "summary": "Summary of the stock analysis section",
-                        "key_points": ["Point 1", "Point 2"],
-                        "overall_summary": "Overall summary of the stock analysis section"
-                    }}
-                ],
+            Use this JSON schema:
+            Section = {{
+                'topic': str,  # One of: "stock analysis", "general discussion", "market news", "market context", "trading context"
+                'stocks': list[str],
+                'start_time': float,
+                'end_time': float,
+                'summary': str,
+                'key_points': list[str],
+                'overall_summary': str
             }}
-
+            
+            Return: {{
+                'sections': list[Section]
+            }}
+            
+            Instructions:
+            1. Break down the content into sections based on the topics listed above
+            2. For each section provide all fields defined in the schema
+            3. When analyzing stock-specific sections:
+               - Include specific stock tickers/names
+               - Note any market data or metrics mentioned
+               - Highlight significant trends or patterns
+            4. Important:
+               - Skip any non-relevant discussions, commercials, or advertising
+               - Focus on actionable trading insights and market analysis
+               - Be specific and detailed in your summaries
+               - Use proper stock ticker symbols
+            
+            IMPORTANT: Your response must be a valid JSON object matching the schema above.
+            Do not include any text before or after the JSON.
+            
+            Here is the transcript to analyze:
+            {raw_transcript}
             """
 
             if self.langtrace is not None:
                 @trace_llm_call("process_transcript")
                 def analyze():
-                    return model.generate_content(prompt)
+                    return model.generate_content(
+                        prompt,
+                        generation_config={
+                            'temperature': 0.1,
+                            'top_p': 0.1,
+                            'top_k': 1
+                        }
+                    )
                 response = analyze()
             else:
-                response = model.generate_content(prompt)
+                response = model.generate_content(
+                    prompt,
+                    generation_config={
+                        'temperature': 0.1,
+                        'top_p': 0.1,
+                        'top_k': 1
+                    }
+                )
 
             try:
-                # Extract JSON content from response
-                text = response.text.strip()
-                # Find the first { and last } to extract JSON
-                start = text.find('{')
-                end = text.rfind('}') + 1
+                # Log raw response for debugging
+                response_text = response.text.strip()
+                logger.info(f"Raw response from model: {response_text[:500]}...")  # Log first 500 chars
                 
-                if start >= 0 and end > start:
-                    json_str = text[start:end]
-                    # Attempt to parse JSON to validate it
-                    parsed_response = json.loads(json_str)
-                    
-                    # Save the properly formatted JSON
-                    raw_response_path = self.summaries_dir / f"{video.id}_raw_llm.json"
-                    with open(raw_response_path, 'w') as f:
-                        json.dump(parsed_response, f, indent=2)
-                    logger.info(f"Saved formatted JSON response to {raw_response_path}")
-                    
-                    return {
-                        "raw_response": parsed_response.get("overall_summary", ""),
-                        "stocks": parsed_response.get("sections", []),
-                        "analysis_json": parsed_response  # Include the full parsed JSON
-                    }
-                else:
-                    logger.error("No JSON content found in response")
-                    # Save the raw text for debugging
-                    raw_response_path = self.summaries_dir / f"{video.id}_raw_llm.txt"
-                    with open(raw_response_path, 'w') as f:
-                        f.write(text)
-                    logger.error(f"Saved problematic response to {raw_response_path}")
-                    return {"raw_response": text, "stocks": [], "analysis_json": {}}
-                    
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse as JSON: {str(e)}")
-                # Save the raw text for debugging
-                raw_response_path = self.summaries_dir / f"{video.id}_raw_llm.txt"
-                with open(raw_response_path, 'w') as f:
-                    f.write(text)
-                logger.error(f"Saved problematic response to {raw_response_path}")
-                return {"raw_response": response.text, "stocks": [], "analysis_json": {}}
+                # Try to find JSON in the response
+                try:
+                    # First try direct JSON parsing
+                    parsed_response = json.loads(response_text)
+                except json.JSONDecodeError:
+                    # If that fails, try to extract JSON from the text
+                    import re
+                    json_match = re.search(r'\{[\s\S]*\}', response_text)
+                    if json_match:
+                        json_str = json_match.group()
+                        parsed_response = json.loads(json_str)
+                    else:
+                        raise ValueError("No valid JSON found in response")
+                
+                logger.info(f"Successfully parsed response: {parsed_response}")
+                
+                # Validate response structure
+                if 'sections' not in parsed_response:
+                    raise ValueError("Response missing required 'sections' field")
+                
+                # Add metadata to the response
+                current_date = datetime.now().strftime("%B %d %Y")
+                final_response = {
+                    "Date": current_date,
+                    "Channel name": video.metadata.channel_name if video.metadata else "",
+                    "Video name": video.metadata.video_title if video.metadata else "",
+                    "sections": parsed_response.get("sections", [])
+                }
+                
+                # Save both raw response and final JSON for debugging
+                raw_response_path = self.summaries_dir / f"{video.id}_raw_llm_response.txt"
+                with open(raw_response_path, 'w', encoding='utf-8') as f:
+                    f.write(response_text)
+                
+                json_response_path = self.summaries_dir / f"{video.id}_raw_llm.json"
+                with open(json_response_path, 'w', encoding='utf-8') as f:
+                    json.dump(final_response, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"Saved raw response to {raw_response_path}")
+                logger.info(f"Saved formatted JSON to {json_response_path}")
+                
+                # Create the return object
+                overall_summary = "\n".join([
+                    section.get("overall_summary", "")
+                    for section in final_response.get("sections", [])
+                ])
+                
+                # Ensure sections have frame_paths field
+                for section in final_response.get("sections", []):
+                    if "frame_paths" not in section:
+                        section["frame_paths"] = []
+                
+                return {
+                    "raw_response": overall_summary,
+                    "stocks": final_response.get("sections", []),
+                    "analysis_json": final_response
+                }
+            except Exception as e:
+                logger.error(f"Failed to process model response: {str(e)}", exc_info=True)
+                # Save the raw response for debugging
+                error_path = self.summaries_dir / f"{video.id}_error_response.txt"
+                with open(error_path, 'w', encoding='utf-8') as f:
+                    f.write(f"Error: {str(e)}\n\nRaw Response:\n{response_text}")
+                logger.error(f"Saved error response to {error_path}")
+                
+                return self._create_default_analysis({
+                    "transcript": raw_transcript,
+                    "error": str(e)
+                })
                 
         except Exception as e:
             logger.error(f"Failed to process transcript: {str(e)}", exc_info=True)
-            return {"raw_response": "", "stocks": [], "analysis_json": {}}
+            return self._create_default_analysis({
+                "transcript": raw_transcript,
+                "error": str(e)
+            })
 
     async def analyze_video_content(self, video: Video) -> Dict[str, Any]:
         """Analyze video content and generate structured summaries"""
@@ -433,11 +753,11 @@ class ContentAnalyzer:
             # Process the transcript and get analysis
             analysis = await self._process_transcript(video, full_transcript_text)
             
-            # Save the analysis JSON and generate frames report
+            # Save the initial analysis JSON
             if 'analysis_json' in analysis:
-                output_path = await self._save_combined_analysis(video, analysis['analysis_json'])
-                logger.info(f"Saved combined analysis to {output_path}")
-        
+                initial_output_path = await self._save_combined_analysis(video, analysis['analysis_json'])
+                logger.info(f"Saved initial analysis to {initial_output_path}")
+            
             return analysis
             
         except Exception as e:
@@ -445,40 +765,14 @@ class ContentAnalyzer:
             raise
 
     async def _save_combined_analysis(self, video: Video, analysis: Dict[str, Any]) -> str:
-        """Save all analysis data in a single JSON file and generate frames report"""
+        """Save all analysis data in a single JSON file."""
         try:
+            # Save the analysis JSON
             output_path = self.summaries_dir / f"{video.id}_analysis.json"
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(analysis, f, indent=2)
             
-            # Add metadata
-            final_analysis = {
-                "metadata": {
-                    "video_id": video.id,
-                    "title": video.metadata.title if video.metadata.title else video.id,
-                    "url": str(video.url),
-                    "duration": video.metadata.duration if video.metadata else None,
-                    "analysis_timestamp": datetime.now().isoformat()
-                }
-            }
-            
-            # Add the analyses
-            final_analysis.update(analysis)
-            
-            with open(output_path, 'w') as f:
-                json.dump(final_analysis, f, indent=2)
-                
             logger.info(f"Saved analysis to {output_path}")
-
-            # Generate frames report after saving analysis
-            try:
-                logger.info(f"Attempting to generate frames report for video {video.id}")
-                logger.debug(f"Video analysis state: {video.analysis if hasattr(video, 'analysis') else 'No analysis'}")
-                logger.debug(f"Video key frames: {video.analysis.key_frames if hasattr(video, 'analysis') and hasattr(video.analysis, 'key_frames') else 'No key_frames'}")
-                
-                report_path = self.report_generator.generate_frames_report(video)
-                logger.info(f"Successfully generated frames report at {report_path}")
-            except Exception as e:
-                logger.error(f"Failed to generate frames report: {str(e)}", exc_info=True)
-            
             return str(output_path)
             
         except Exception as e:

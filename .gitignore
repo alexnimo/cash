@@ -1,11 +1,8 @@
 videos/*
 .env
-<<<<<<< HEAD
 *.pyc
 __pycache__/
-<<<<<<< HEAD
-<<<<<<< HEAD
 app/__pycache__/*
-=======
 .aider*
->>>>>>> 20d3b02 (add aider env to gitignore)
+app/temp/*
+temp_*

@@ -1,10 +1,11 @@
 from pydantic import BaseModel, HttpUrl
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 from datetime import datetime
 from enum import Enum
 
 class VideoSource(str, Enum):
     YOUTUBE = "youtube"
+    TEST = "test"
 
 class VideoStatus(str, Enum):
     PENDING = "pending"
@@ -18,6 +19,8 @@ class VideoMetadata(BaseModel):
     resolution: Tuple[int, int]
     format: str
     size_bytes: int
+    channel_name: Optional[str] = ""
+    video_title: Optional[str] = ""
 
 class TranscriptSegment(BaseModel):
     start_time: float
@@ -30,6 +33,7 @@ class VideoAnalysis(BaseModel):
     summary: str
     key_frames: List[str]  # Paths to extracted key frames
     embedding_id: str
+    frame_analysis: Optional[Dict] = {}  # Analysis of frames with section mappings
     
 class Video(BaseModel):
     id: str
@@ -43,3 +47,6 @@ class Video(BaseModel):
     transcript: Optional[List[TranscriptSegment]] = None
     analysis: Optional[VideoAnalysis] = None
     error: Optional[str] = None
+
+    class Config:
+        arbitrary_types_allowed = True

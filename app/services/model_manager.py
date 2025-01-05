@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Union
 import base64
 from pathlib import Path
 import os
@@ -492,6 +492,26 @@ class ModelManager:
                 'error': str(e),
                 'timestamp': datetime.datetime.now().isoformat()
             }
+
+    async def upload_file(self, file_path: Union[str, Path]) -> Any:
+        """Upload a file to Gemini using the file upload API"""
+        try:
+            # Convert string to Path if needed
+            if isinstance(file_path, str):
+                file_path = Path(file_path)
+                
+            logger.info(f"Uploading file to Gemini: {file_path}")
+            if not file_path.exists():
+                raise ValueError(f"File not found: {file_path}")
+            
+            # Upload file using Gemini's file upload API
+            uploaded_file = genai.upload_file(str(file_path))
+            logger.info(f"Successfully uploaded file: {file_path}")
+            return uploaded_file
+            
+        except Exception as e:
+            logger.error(f"Failed to upload file to Gemini: {str(e)}", exc_info=True)
+            raise
 
 class QuotaExceededError(Exception):
     """Raised when API quota is exhausted"""

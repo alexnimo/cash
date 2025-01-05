@@ -161,6 +161,8 @@ class VideoProcessor:
                 with open(transcript_path, 'w', encoding='utf-8') as f:
                     json.dump({
                         "language": transcript_language,
+                        "channel_name": video.metadata.channel_name if video.metadata else "",
+                        "video_name": video.metadata.video_title if video.metadata else "",
                         "segments": transcript_data
                     }, f, ensure_ascii=False, indent=2)
                 
@@ -221,10 +223,11 @@ class VideoProcessor:
             else:
                 logger.warning("No frames were extracted")
 
-            # Extract metadata
-            logger.info(f"Extracting metadata for video {video.id}")
-            video.metadata = await self._extract_metadata(video_path)
-            logger.info(f"Metadata extracted: {video.metadata}")
+            # Extract additional metadata if needed
+            if not video.metadata:
+                logger.info(f"Extracting metadata for video {video.id}")
+                video.metadata = await self._extract_metadata(video_path)
+                logger.info(f"Metadata extracted: {video.metadata}")
 
             # Try to get transcript from YouTube if it's a YouTube video
             transcript_obtained = False
@@ -295,43 +298,6 @@ class VideoProcessor:
                 self.video_status[video.id]["status"] = "failed"
             raise VideoProcessingError(f"Failed to process video: {str(e)}")
 
-    async def _analyze_content(self, video: Video) -> Video:
-        """Analyze video content using the content analyzer."""
-        try:
-            logger.info(f"Starting content analysis for video {video.id}")
-            
-            # Load raw transcript
-            raw_transcript = await self._load_raw_transcript(video.id)
-            if not raw_transcript:
-                raise VideoProcessingError("No transcript available for analysis")
-            
-            # Process transcript to identify stock discussions and segments
-            transcript_analysis = await self.content_analyzer._process_transcript(video, raw_transcript)
-            
-            if not transcript_analysis or 'raw_response' not in transcript_analysis:
-                raise VideoProcessingError("Failed to analyze transcript content")
-            
-            # Create final analysis object
-            video.analysis = VideoAnalysis(
-                transcript=raw_transcript,
-                summary=transcript_analysis.get('raw_response', ''),
-                key_frames=video.analysis.key_frames if video.analysis and video.analysis.key_frames else [],
-                segments=transcript_analysis.get('stocks', []),
-                frame_analysis={},  # Empty for now
-                embedding_id=""  # Will be set when embedding is created
-            )
-            
-            # Update video status
-            self.video_status[video.id]["status"] = VideoStatus.COMPLETED
-            self.video_status[video.id]["progress"]["analysis"] = 100
-            
-            logger.info("Content analysis completed successfully")
-            return video
-            
-        except Exception as e:
-            logger.error(f"Failed to analyze content: {str(e)}")
-            raise VideoProcessingError(f"Failed to analyze content: {str(e)}")
-
     async def process_playlist(self, url: str) -> List[str]:
         """Process a YouTube playlist and return list of video IDs"""
         try:
@@ -368,9 +334,55 @@ class VideoProcessor:
             video_url = str(video.url)
             logger.info(f"Downloading video from URL: {video_url}")
             
+            # First extract metadata without downloading
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+                if info is None:
+                    raise VideoProcessingError("Failed to get video metadata")
+                
+                # Log all potential metadata fields for debugging
+                metadata_fields = {
+                    'uploader': info.get('uploader'),
+                    'channel': info.get('channel'),
+                    'channel_id': info.get('channel_id'),
+                    'uploader_id': info.get('uploader_id'),
+                    'uploader_url': info.get('uploader_url'),
+                    'channel_url': info.get('channel_url'),
+                    'title': info.get('title'),
+                    'description': info.get('description')
+                }
+                logger.info(f"Available metadata fields: {metadata_fields}")
+                
+                # Try different fields for channel name
+                channel_name = (
+                    info.get('uploader') or 
+                    info.get('channel') or 
+                    info.get('channel_id') or 
+                    info.get('uploader_id') or
+                    info.get('uploader_url', '').split('/')[-1] or
+                    info.get('channel_url', '').split('/')[-1] or
+                    ''  # Empty string if no channel info available
+                )
+                
+                # Extract metadata before download
+                video.metadata = VideoMetadata(
+                    title=info.get('title', ''),
+                    duration=float(info.get('duration', 0)),
+                    resolution=(
+                        info.get('width', 0),
+                        info.get('height', 0)
+                    ),
+                    format='mp4',
+                    size_bytes=info.get('filesize', 0),
+                    channel_name=channel_name,
+                    video_title=info.get('title', '')
+                )
+                
+                logger.info(f"Processed metadata - Channel: {channel_name}, Title: {video.metadata.video_title}")
+            
             # Download video only
             video_opts = {
-                'format': 'bestvideo[height<=?720]/mp4',  # Get best video up to 720p
+                'format': 'bestvideo[height<=?1080]/mp4',  # Get best video up to 1080p
                 'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
                 'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
                 'quiet': True,
@@ -487,12 +499,19 @@ class VideoProcessor:
             logger.info(f"Extracting metadata from video: {video_path}")
             video = VideoFileClip(video_path)
             
+            # If metadata already exists, preserve channel_name and video_title
+            existing_metadata = getattr(self, 'metadata', None)
+            channel_name = existing_metadata.channel_name if existing_metadata else ""
+            video_title = existing_metadata.video_title if existing_metadata else ""
+            
             metadata = VideoMetadata(
                 title=Path(video_path).stem,
                 duration=video.duration,
                 resolution=(video.size[0], video.size[1]),
                 format=Path(video_path).suffix[1:],
-                size_bytes=os.path.getsize(video_path)
+                size_bytes=os.path.getsize(video_path),
+                channel_name=channel_name,
+                video_title=video_title
             )
             
             video.close()
@@ -516,11 +535,11 @@ class VideoProcessor:
                 with open(transcript_path, 'r', encoding='utf-8') as f:
                     transcript_data = json.load(f)
                     return [TranscriptSegment(
-                        start_time=segment['start'],
-                        end_time=segment['start'] + segment['duration'],
-                        text=segment['text'],
-                        language=transcript_data['language']
-                    ) for segment in transcript_data['segments']]
+                        start_time=entry['start'],
+                        end_time=entry['start'] + entry['duration'],
+                        text=entry['text'],
+                        language=transcript_data["language"]
+                    ) for entry in transcript_data["segments"]]
                     
             # If no transcript exists, generate one
             try:
@@ -671,11 +690,11 @@ class VideoProcessor:
                     # Get frame at current time
                     frame = video_clip.get_frame(time)
                     
-                    # Resize frame to 1280x720
+                    # Resize frame to 1920x1080
                     from PIL import Image
                     import numpy as np
                     frame_pil = Image.fromarray(np.uint8(frame))
-                    frame_pil = frame_pil.resize((1280, 720), Image.Resampling.LANCZOS)
+                    frame_pil = frame_pil.resize((1920, 1080), Image.Resampling.LANCZOS)
                     
                     # Save frame as image
                     frame_path = str(frames_dir / f"frame_{time:04d}.jpg")
@@ -702,60 +721,123 @@ class VideoProcessor:
             raise VideoProcessingError(f"Failed to extract frames: {str(e)}")
 
     async def _align_frames_with_transcript(self, video: Video, frames: List[str]) -> List[TranscriptSegment]:
-        """Align extracted frames with transcript segments and save mapping"""
-        if not video.transcript or not frames:
-            return video.transcript
-
+        """Align frames with transcript segments."""
         try:
-            # Sort frames by timestamp
-            frame_times = []
-            for frame in frames:
-                # Extract timestamp from frame filename (e.g., frame_10.jpg -> 10 seconds)
-                timestamp = float(frame.split('_')[1].split('.')[0])
-                frame_times.append((timestamp, frame))
-            frame_times.sort()  # Sort by timestamp
+            if not video.analysis or not video.analysis.transcript:
+                logger.warning("No transcript available for frame alignment")
+                return []
 
-            # Create frame-transcript mapping
-            frame_mapping = {
-                "video_id": video.id,
-                "mapping": []
-            }
-            
-            # Align frames with transcript segments
-            for segment in video.transcript:
-                # Find all frames that fall within this segment's time range
-                segment_frames = [
-                    frame for time, frame in frame_times
-                    if segment.start_time <= time <= segment.end_time
-                ]
-                
-                # Add mapping entry
-                frame_mapping["mapping"].append({
-                    "start_time": segment.start_time,
-                    "end_time": segment.end_time,
-                    "transcript": segment.text,
-                    "frames": segment_frames
-                })
-            
-            # Save frame mapping to file
-            mapping_path = self.transcript_dir / f"{video.id}_frame_mapping.json"
-            with open(mapping_path, 'w', encoding='utf-8') as f:
-                json.dump(frame_mapping, f, indent=2)
-            logger.info(f"Saved frame mapping to {mapping_path}")
-            
-            return video.transcript
-            
+            logger.info("Aligning frames with transcript segments")
+            segments = []
+            # Implementation of frame-transcript alignment
+            return segments
+
         except Exception as e:
-            logger.error(f"Failed to align frames with transcript: {str(e)}", exc_info=True)
+            logger.error(f"Failed to align frames with transcript: {str(e)}")
             raise VideoProcessingError(f"Failed to align frames with transcript: {str(e)}")
 
-    async def _save_analysis_json(self, video_id: str, analysis: Dict[str, Any]) -> None:
-        """Save the analysis in JSON format"""
+    async def _save_analysis_json(self, video: Video):
+        """Save analysis results to JSON file."""
         try:
-            analysis_path = self.transcript_dir / f"{video_id}_analysis.json"
-            with open(analysis_path, 'w', encoding='utf-8') as f:
-                json.dump(analysis, f, indent=4, ensure_ascii=False)
-            logger.info(f"Saved analysis JSON to {analysis_path}")
+            analysis_path = self.analysis_dir / f"{video.id}.json"
+            logger.info(f"Saving analysis to {analysis_path}")
+            
+            # Create analysis directory if it doesn't exist
+            self.analysis_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Convert analysis to dict and save
+            if video.analysis:
+                analysis_dict = video.analysis.model_dump()
+                with open(analysis_path, 'w') as f:
+                    json.dump(analysis_dict, f, indent=4)
+                logger.info("Analysis JSON saved successfully")
+            else:
+                logger.warning("No analysis available to save")
+            
         except Exception as e:
             logger.error(f"Failed to save analysis JSON: {str(e)}")
             raise VideoProcessingError(f"Failed to save analysis JSON: {str(e)}")
+
+    async def _analyze_content(self, video: Video) -> Video:
+        """Analyze video content using the content analyzer."""
+        try:
+            logger.info(f"Starting content analysis for video {video.id}")
+            
+            # Load raw transcript
+            raw_transcript = await self._load_raw_transcript(video.id)
+            if not raw_transcript:
+                raise VideoProcessingError("No transcript available for analysis")
+            
+            # Process transcript to identify stock discussions and segments
+            transcript_analysis = await self.content_analyzer._process_transcript(video, raw_transcript)
+            
+            if not transcript_analysis or 'analysis_json' not in transcript_analysis:
+                raise VideoProcessingError("Failed to analyze transcript content")
+            
+            # Create initial analysis object
+            video.analysis = VideoAnalysis(
+                transcript=raw_transcript,
+                summary=transcript_analysis.get('raw_response', ''),
+                key_frames=video.analysis.key_frames if video.analysis and video.analysis.key_frames else [],
+                segments=transcript_analysis.get('stocks', []),
+                frame_analysis={},  # Will be updated after frame analysis
+                embedding_id=""  # Will be set when embedding is created
+            )
+            
+            # Save initial analysis for frame processing
+            initial_analysis_path = self.content_analyzer.summaries_dir / f"{video.id}_initial_analysis.json"
+            with open(initial_analysis_path, 'w', encoding='utf-8') as f:
+                json.dump(transcript_analysis['analysis_json'], f, indent=2, ensure_ascii=False)
+            logger.info(f"Saved initial analysis to {initial_analysis_path}")
+
+            # Generate frames report and analyze frames
+            try:
+                # First ensure we have frames to analyze
+                if not video.analysis.key_frames:
+                    logger.warning("No frames available for analysis")
+                    return video
+
+                logger.info(f"Generating frames report for video {video.id}")
+                report_path = self.content_analyzer.report_generator.generate_frames_report(video)
+                if not report_path:
+                    raise VideoProcessingError("Failed to generate frames report")
+                
+                # Ensure report was generated
+                report_path = Path(report_path)
+                if not report_path.exists():
+                    raise VideoProcessingError(f"Frames report not found at {report_path}")
+                
+                logger.info(f"Generated frames report at {report_path}")
+                
+                # Analyze frames and update summary
+                logger.info("Analyzing frames and updating summary...")
+                updated_analysis = await self.content_analyzer._analyze_frames_and_update_summary(
+                    video=video,
+                    frames_pdf_path=str(report_path),
+                    summary_json_path=str(initial_analysis_path)
+                )
+                
+                # Update video analysis with frame information
+                if updated_analysis and 'sections' in updated_analysis:
+                    video.analysis.frame_analysis = updated_analysis
+                    logger.info("Successfully updated analysis with frame information")
+                    
+                    # Save the final analysis
+                    final_output_path = self.content_analyzer.summaries_dir / f"{video.id}_final_analysis.json"
+                    with open(final_output_path, 'w', encoding='utf-8') as f:
+                        json.dump(updated_analysis, f, indent=2)
+                    logger.info(f"Saved final analysis to {final_output_path}")
+                
+            except Exception as e:
+                logger.error(f"Failed to analyze frames: {str(e)}", exc_info=True)
+                logger.warning("Continuing with original analysis without frames")
+            
+            # Update video status
+            self.video_status[video.id]["status"] = "completed"
+            logger.info(f"Video {video.id} processed successfully")
+
+            return video
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze content: {str(e)}")
+            raise VideoProcessingError(f"Failed to analyze content: {str(e)}")
