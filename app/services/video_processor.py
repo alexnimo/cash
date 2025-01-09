@@ -17,6 +17,7 @@ from app.core.settings import get_settings
 from app.services.model_manager import ModelManager
 from app.services.model_config import configure_models
 from app.services.content_analyzer import ContentAnalyzer
+from app.services.errors import VideoProcessingError
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -33,10 +34,6 @@ configure_models()
 
 # Get the absolute path to the project root directory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.absolute()
-
-class VideoProcessingError(Exception):
-    """Base exception for video processing errors"""
-    pass
 
 class VideoProcessor:
     def __init__(self, video_status: Dict[str, Dict]):
