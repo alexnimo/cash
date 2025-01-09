@@ -8,6 +8,7 @@ from reportlab.lib.units import inch
 from app.models.video import Video
 import logging
 from PIL import Image as PILImage
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +140,11 @@ class ReportGenerator:
                 
                 # Add frame image
                 try:
-                    img = Image(frame_path, width=6*inch, height=4*inch)
+                    # Properly handle paths with special characters
+                    safe_path = urllib.parse.unquote(str(frame_path))
+                    img = Image(safe_path, width=6*inch, height=4*inch)
                     story.append(img)
-                    logger.debug(f"Added image to report: {frame_path}")
+                    logger.debug(f"Added image to report: {safe_path}")
                 except Exception as e:
                     logger.error(f"Failed to add image to report: {str(e)}")
                     continue
