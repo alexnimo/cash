@@ -19,3 +19,4 @@ google-generativeai>=0.3.0
 youtube-transcript-api>=0.6.1
 reportlab>=4.0.8
 PyPDF2>=3.0.0
+notion-client==2.2.1

@@ -6,3 +6,4 @@ app/__pycache__/*
 .aider*
 app/temp/*
 temp_*
+spec*

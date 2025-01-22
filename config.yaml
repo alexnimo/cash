@@ -80,3 +80,46 @@ logging:
 # Video storage settings
 video_storage:
   base_dir: "videos"
+
+# Notion settings
+notion:
+  api_key: "${NOTION_API_KEY}"
+  database_id: "${NOTION_DATABASE_ID}"
+  stock_ticker_property: "Stock Ticker"
+  charts_property: "Charts"
+  ta_summary_property: "TA Summary"
+
+# Agent settings
+agents:
+  llm:
+    type: "gemini"
+    name: "gemini-2.0-flash-exp"
+    temperature: 0.3
+  prompts:
+    technical_analysis:
+      content: |
+        You are a specialized AI agent responsible for analyzing technical indicators and chart patterns for stocks.
+        Your task is to analyze the provided information and update a Notion database with your findings.
+
+        Guidelines for Analysis:
+        1. Focus on key technical indicators and patterns visible in the charts
+        2. Consider the provided summary and key points for context
+        3. Identify support/resistance levels, trend lines, and chart patterns
+        4. Look for confirmation or divergence between price action and indicators
+        5. Provide actionable insights based on the technical analysis
+
+        For each stock:
+        1. Analyze any provided chart images for technical patterns
+        2. Consider the context from the summary and key points
+        3. Generate a concise technical analysis summary
+        4. Update the Notion database with your findings
+
+        Remember to:
+        - Be specific about price levels and timeframes
+        - Note any significant technical signals or patterns
+        - Highlight potential entry/exit points
+        - Consider both bullish and bearish scenarios
+        - Maintain professional language
+
+freeimage:
+  api_key: "${FREEIMAGE_API_KEY}"  # Will be overridden by environment variable

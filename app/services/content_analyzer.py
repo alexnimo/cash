@@ -81,20 +81,25 @@ class ContentAnalyzer:
             self.video_analysis_model = await self.model_manager.get_video_analysis_model()
         return self.video_analysis_model
 
+    @trace_llm_call("analyze_transcript_segment")
     async def _analyze_transcript_segment(self, transcript_text: str, parent_trace=None) -> List[Dict[str, Any]]:
         """Analyze the full transcript and break it into meaningful segments"""
+        logger.info("Starting transcript segment analysis")
         try:
             # Wait for rate limit before proceeding
             model_name = self.settings.model.transcription.name
+            logger.debug(f"Using model: {model_name}")
             await self.model_manager._wait_for_rate_limit(model_name)
             
             # Get the model for analysis
             model = await self.model_manager._initialize_model(model_name)
+            logger.debug("Model initialized successfully")
             
             if not transcript_text or len(transcript_text.strip()) < 10:
                 logger.warning("Empty or very short transcript, skipping analysis")
                 return []
-                
+            
+            logger.info(f"Analyzing transcript of length: {len(transcript_text)}")
             prompt = f"""You are a financial content analyzer. Analyze this complete video transcript and break it down into meaningful segments.
             The transcript includes timestamps in [HH:MM:SS] format. Use these to determine segment boundaries.
 
