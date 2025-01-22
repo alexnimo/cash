@@ -25,6 +25,15 @@ if not logger.handlers:
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
+# Load environment variables at module level
+env_path = Path(".env")
+if env_path.exists():
+    load_dotenv(env_path)
+    logger.info(f"Loaded environment from {env_path.absolute()}")
+    logger.info(f"FREEIMAGE_API_KEY present: {bool(os.getenv('FREEIMAGE_API_KEY'))}")
+else:
+    logger.warning(f"No .env file found at {env_path.absolute()}")
+
 print("Settings module loaded")
 
 class VideoStorageSettings(BaseModel):
@@ -86,6 +95,35 @@ class ProcessingConfig(BaseModel):
     max_parallel_chunks: int
     max_video_duration: int
 
+class LLMConfig(BaseModel):
+    type: str = Field(default="gemini")
+    name: str = Field(default="gemini-pro")
+    temperature: float = Field(default=0.7)
+
+class PromptConfig(BaseModel):
+    content: str = Field(default="")
+
+class AgentPrompts(BaseModel):
+    technical_analysis: PromptConfig = Field(default_factory=lambda: PromptConfig())
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+class AgentConfig(BaseModel):
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    prompts: AgentPrompts = Field(default_factory=AgentPrompts)
+
+class NotionConfig(BaseModel):
+    api_key: str
+    database_id: str
+    parent_page_id: Optional[str] = None
+    stock_ticker_property: str = Field(default="Stock Ticker")
+    charts_property: str = Field(default="Charts")
+    ta_summary_property: str = Field(default="TA Summary")
+
+class FreeimageSettings(BaseModel):
+    api_key: str = Field(default_factory=lambda: os.getenv("FREEIMAGE_API_KEY", ""))
+
 class Settings(BaseModel):
     app_name: str
     model: ModelConfig
@@ -96,6 +134,9 @@ class Settings(BaseModel):
     processing: ProcessingConfig
     logging: LoggingSettings
     video_storage: VideoStorageSettings
+    agents: AgentConfig = Field(default_factory=AgentConfig)
+    notion: NotionConfig
+    freeimage: FreeimageSettings = Field(default_factory=FreeimageSettings)
 
 _settings_instance = None
 
@@ -103,10 +144,6 @@ def load_settings() -> Settings:
     """Load settings from config file and environment variables."""
     try:
         print("Loading settings...")
-        # Load environment variables
-        load_dotenv()
-        print("Environment variables loaded")
-
         # Load config file
         config_path = Path("config.yaml")
         if not config_path.exists():
@@ -130,17 +167,36 @@ def load_settings() -> Settings:
             config["langtrace"]["api_key"] = os.environ["LANGTRACE_API_KEY"]
             config["langtrace"]["enabled"] = True
             print(f"LangTrace API key set: {config['langtrace']['api_key'][:8]}...")
+            
+        if "NOTION_API_KEY" in os.environ:
+            print("Found NOTION_API_KEY in environment")
+            if "notion" not in config:
+                config["notion"] = {}
+            config["notion"]["api_key"] = os.environ["NOTION_API_KEY"]
+            print("Notion API key set")
+            
+        if "NOTION_DATABASE_ID" in os.environ:
+            print("Found NOTION_DATABASE_ID in environment")
+            if "notion" not in config:
+                config["notion"] = {}
+            config["notion"]["database_id"] = os.environ["NOTION_DATABASE_ID"]
+            print(f"Notion database ID set: {os.environ['NOTION_DATABASE_ID']}")
+            
+        if "FREEIMAGE_API_KEY" in os.environ:
+            print("Found FREEIMAGE_API_KEY in environment")
+            if "freeimage" not in config:
+                config["freeimage"] = {}
+            config["freeimage"]["api_key"] = os.environ["FREEIMAGE_API_KEY"]
+            print(f"Freeimage API key set: {os.environ['FREEIMAGE_API_KEY'][:8]}...")
 
         # Create settings instance
         settings = Settings(**config)
         print("Settings instance created")
         
-        # Verify LangTrace settings
-        if settings.langtrace.enabled:
-            if not settings.langtrace.api_key:
-                print("Warning: LangTrace is enabled but API key is not set")
-            else:
-                print(f"LangTrace is enabled with API key: {settings.langtrace.api_key[:8]}...")
+        # Print all settings sections for debugging
+        print("Available settings sections:", list(config.keys()))
+        if "freeimage" in config:
+            print("Freeimage settings:", config["freeimage"])
         
         return settings
         

@@ -2,6 +2,8 @@ import os
 import json
 import uuid
 import logging
+import tempfile
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,10 +23,11 @@ from app.core.config import get_settings
 from app.api.routes import router as api_router
 from app.routes import settings_routes
 from app.utils.langtrace_utils import init_langtrace, get_langtrace
+from app.agents.technical_analysis_agent import TechnicalAnalysisAgent
 
 # Configure logging at the root level
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -36,7 +39,6 @@ settings = get_settings()
 logger.info("Initializing LangTrace...")
 if init_langtrace():
     logger.info("LangTrace initialized successfully")
-    # Verify LangTrace instance
     langtrace_instance = get_langtrace()
     if langtrace_instance:
         logger.info("LangTrace instance verified")
@@ -50,22 +52,33 @@ app = FastAPI(title=settings.app_name)
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development only
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Get the absolute path to the static directory
-static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "static")
-logger.info(f"Static directory path: {static_dir}")
+static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+logger.debug(f"Calculated static directory path: {static_dir}")
 
-# Verify directory exists
+# Ensure static directory exists
 if not os.path.exists(static_dir):
+    logger.error(f"Static directory not found at: {static_dir}")
     raise RuntimeError(f"Static directory not found at: {static_dir}")
+else:
+    logger.info(f"Static directory found at: {static_dir}")
+    # List contents of static directory
+    files = os.listdir(static_dir)
+    logger.info(f"Static directory contents: {files}")
 
-# Mount static files
+# Mount static files directory BEFORE any routes
+logger.info("Mounting static files directory...")
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
+logger.info("Static files directory mounted successfully")
+
+# Configure templates
+templates = Jinja2Templates(directory="app/templates")
 
 # Create temp directory at startup
 temp_dir = os.path.join("temp")
@@ -208,7 +221,7 @@ async def analyze_youtube_video(request: YouTubeRequest, background_tasks: Backg
                 "downloading": 0,
                 "transcribing": 0,
                 "analyzing": 0,
-                "extracting_frames": 0  # Add missing progress field
+                "extracting_frames": 0
             }
         }
         
@@ -309,7 +322,7 @@ async def check_quota():
 async def test_pdf_analysis(
     pdf_file: UploadFile = File(...),
     json_file: UploadFile = File(...),
-    split_pdf: bool = Form(False)  # New parameter to control splitting
+    split_pdf: bool = Form(False)
 ):
     """Test endpoint to analyze a PDF file with frames using an existing JSON summary."""
     logger.info(f"Received analysis request - PDF: {pdf_file.filename}, JSON: {json_file.filename}, Split: {split_pdf}")
@@ -410,6 +423,123 @@ async def test_pdf_analysis(
         error_msg = str(e)
         logger.error(f"Error in PDF analysis test: {error_msg}", exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
+
+@app.post("/api/submit-report")
+async def submit_report(
+    report: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None
+):
+    """Handle manual report submission."""
+    logger.info(f"Received report submission: {report.filename}")
+    settings = get_settings()
+    
+    if not report.filename.endswith('.json'):
+        logger.error(f"Invalid file type: {report.filename}")
+        raise HTTPException(status_code=400, detail="Only JSON files are accepted")
+        
+    try:
+        # Read content
+        content = await report.read()
+        logger.debug(f"Report size: {len(content)} bytes")
+        
+        try:
+            # Parse JSON just to validate format
+            report_data = json.loads(content)
+            logger.info("Report parsed successfully")
+            
+            # Create temp directory if it doesn't exist
+            temp_dir = Path(settings.storage.temp_dir)
+            if not temp_dir.is_absolute():
+                # If relative path, make it absolute from project root
+                project_root = Path(__file__).parent.parent
+                temp_dir = project_root / temp_dir
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Using temp directory: {temp_dir}")
+            logger.debug(f"Temp directory exists: {temp_dir.exists()}")
+            logger.debug(f"Temp directory is absolute: {temp_dir.is_absolute()}")
+            
+            # Save uploaded file temporarily
+            tmp_path = temp_dir / f"{uuid.uuid4()}_report.json"
+            # Write file with explicit encoding
+            tmp_path.write_text(json.dumps(report_data, indent=2), encoding='utf-8')
+            logger.debug(f"Saved report to temporary file: {tmp_path}")
+            logger.debug(f"File exists after write: {tmp_path.exists()}")
+            if tmp_path.exists():
+                logger.debug(f"File size after write: {tmp_path.stat().st_size} bytes")
+                logger.debug(f"File contents: {tmp_path.read_text(encoding='utf-8')[:100]}...")
+            
+            try:
+                # Validate Notion settings
+                settings = get_settings()
+                if not settings.notion.api_key:
+                    raise ValueError("Notion API token not found in settings. Please check your .env file for NOTION_API_KEY.")
+                    
+                if not settings.notion.database_id:
+                    raise ValueError("Notion database ID not found in settings. Please check your .env file for NOTION_DATABASE_ID.")
+                
+                # Log credentials being used (mask sensitive parts)
+                api_key = settings.notion.api_key
+                db_id = settings.notion.database_id
+                logger.info(f"Using Notion API key: {api_key[:4]}...{api_key[-4:] if len(api_key) > 8 else ''}")
+                logger.info(f"Using Notion database ID: {db_id}")
+                    
+                # Validate API token first
+                from notion_client import Client
+                notion = Client(auth=settings.notion.api_key)
+                try:
+                    # Try a simple API call to validate token
+                    notion.users.me()
+                    logger.info("Notion API token validated successfully")
+                except Exception as e:
+                    raise ValueError(f"Invalid Notion API token. Please check NOTION_API_KEY in your .env file. Error: {str(e)}")
+                
+                # Now validate database access
+                try:
+                    db = notion.databases.retrieve(database_id=settings.notion.database_id)
+                    logger.info(f"Found Notion database: {db['title'][0]['text']['content']}")
+                except Exception as e:
+                    raise ValueError(f"Could not access Notion database. Please check NOTION_DATABASE_ID in .env file. Error: {str(e)}")
+                
+                # Create and execute technical analysis agent
+                agent = TechnicalAnalysisAgent()
+                logger.info("Starting technical analysis agent execution")
+                
+                # Convert to string and check if file exists
+                tmp_path_str = str(tmp_path)
+                logger.debug(f"Passing file path to agent: {tmp_path_str}")
+                logger.debug(f"File exists before agent: {Path(tmp_path_str).exists()}")
+                
+                if background_tasks:
+                    # Run in background if background_tasks is provided
+                    background_tasks.add_task(agent.execute, tmp_path_str)
+                    logger.info("Technical analysis scheduled for background execution")
+                    cleanup_message = "Report scheduled for processing"
+                else:
+                    # Run synchronously
+                    await agent.execute(tmp_path_str)
+                    logger.info("Technical analysis completed successfully")
+                    cleanup_message = "Report processed successfully"
+                    
+                return {
+                    "status": "success",
+                    "message": cleanup_message,
+                    "report_size": len(content)
+                }
+                
+            except Exception as e:
+                logger.error(f"Error during technical analysis: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"Technical analysis failed: {str(e)}")
+            finally:
+                # Keep the file for debugging
+                logger.debug(f"Keeping temporary file for debugging: {tmp_path}")
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"Invalid JSON format: {str(e)}")
+            
+    except Exception as e:
+        logger.error(f"Unexpected error in submit_report: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

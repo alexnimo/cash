@@ -1,5 +1,110 @@
+alert('Testing if app.js is loaded');
+
+console.log('app.js is loaded!');
+
+// Global constants
+const API_BASE_URL = '/'; // Use relative paths for uvicorn server
+
+// File upload handlers
+window.handleSummaryUpload = async function(event) {
+    event.preventDefault();
+    console.log('Handle summary upload called');
+    const fileInput = document.getElementById('summaryFile');
+    const file = fileInput.files[0];
+    console.log('Selected file:', file);
+    
+    if (!file) {
+        console.log('No file selected');
+        showError('Please select a file to upload');
+        return;
+    }
+    
+    if (!file.name.endsWith('.json')) {
+        console.log('Invalid file type:', file.name);
+        showError('Only JSON files are accepted');
+        return;
+    }
+    
+    try {
+        const formData = new FormData();
+        formData.append('report', file);
+        const submitUrl = `${API_BASE_URL}api/submit-report`;
+        console.log('Sending request to:', submitUrl);
+        
+        const response = await fetch(submitUrl, {
+            method: 'POST',
+            body: formData
+        });
+        console.log('Response received:', response);
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            console.error('Error response:', errorData);
+            throw new Error(errorData.detail || 'Failed to upload summary');
+        }
+        
+        const result = await response.json();
+        console.log('Success response:', result);
+        showSuccess(result.message || 'Summary uploaded successfully');
+        
+        // Clear the file input
+        fileInput.value = '';
+        
+        // Update status with processing info
+        updateStatus(`Processing summary: ${file.name}`, null, false);
+        
+    } catch (error) {
+        console.error('Error uploading summary:', error);
+        showError(error.message || 'Failed to upload summary');
+    }
+}
+
+// Helper functions
+window.showError = function(message) {
+    const errorDisplay = document.getElementById('errorDisplay');
+    if (errorDisplay) {
+        errorDisplay.textContent = message;
+        errorDisplay.classList.remove('hidden');
+        setTimeout(() => {
+            errorDisplay.classList.add('hidden');
+        }, 5000);
+    } else {
+        console.error('Error:', message);
+    }
+}
+
+window.showSuccess = function(message) {
+    const successDisplay = document.getElementById('successDisplay') || createSuccessDisplay();
+    successDisplay.textContent = message;
+    successDisplay.classList.remove('hidden');
+    setTimeout(() => {
+        successDisplay.classList.add('hidden');
+    }, 3000);
+}
+
+window.updateStatus = function(message, id = null, isError = false) {
+    const statusList = document.getElementById('statusList');
+    if (!statusList) return;
+
+    const statusItem = document.createElement('div');
+    statusItem.className = `p-2 mb-2 rounded ${isError ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'}`;
+    statusItem.textContent = message;
+    if (id) statusItem.id = `status-${id}`;
+    
+    statusList.appendChild(statusItem);
+}
+
+function createSuccessDisplay() {
+    const successDisplay = document.createElement('div');
+    successDisplay.id = 'successDisplay';
+    successDisplay.className = 'bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4 hidden';
+    const targetSection = document.getElementById('status') || document.body;
+    targetSection.insertBefore(successDisplay, targetSection.firstChild);
+    return successDisplay;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    const API_BASE_URL = '/'; // Update API base URL to use relative paths
+    console.log('DOM loaded');
     
     // Initialize UI elements first
     const statusSection = document.getElementById('status');
@@ -19,37 +124,6 @@ document.addEventListener('DOMContentLoaded', () => {
         errorDisplay.className = 'bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative mb-4 hidden';
         const targetSection = document.getElementById('status') || document.body;
         targetSection.insertBefore(errorDisplay, targetSection.firstChild);
-    }
-
-    function showError(message) {
-        const errorDisplay = document.getElementById('errorDisplay');
-        if (errorDisplay) {
-            errorDisplay.textContent = message;
-            errorDisplay.classList.remove('hidden');
-            setTimeout(() => {
-                errorDisplay.classList.add('hidden');
-            }, 5000);
-        } else {
-            console.error('Error:', message);
-        }
-    }
-
-    function showSuccess(message) {
-        const successDisplay = document.getElementById('successDisplay') || createSuccessDisplay();
-        successDisplay.textContent = message;
-        successDisplay.classList.remove('hidden');
-        setTimeout(() => {
-            successDisplay.classList.add('hidden');
-        }, 3000);
-    }
-
-    function createSuccessDisplay() {
-        const successDisplay = document.createElement('div');
-        successDisplay.id = 'successDisplay';
-        successDisplay.className = 'bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded relative mb-4 hidden';
-        const targetSection = document.getElementById('status') || document.body;
-        targetSection.insertBefore(successDisplay, targetSection.firstChild);
-        return successDisplay;
     }
 
     // Add quota check button
@@ -130,69 +204,70 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Initialize LangTrace settings
-    const saveLangtraceButton = document.getElementById('saveLangtraceSettings');
-    if (saveLangtraceButton) {
-        saveLangtraceButton.addEventListener('click', saveLangTraceSettings);
-        // Load initial LangTrace settings
-        loadLangTraceSettings();
+    const summaryForm = document.getElementById('summaryUploadForm');
+    console.log('Found summary form:', summaryForm);
+    
+    if (summaryForm) {
+        summaryForm.addEventListener('submit', handleSummaryUpload);
     }
 
-    async function loadLangTraceSettings() {
-        try {
-            const response = await fetch(`${API_BASE_URL}api/langtrace/config`);
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            const data = await response.json();
+    // Initialize form handlers
+    const uploadBtn = document.getElementById('uploadSummaryBtn');
+    console.log('Found upload button:', uploadBtn);
+    
+    if (uploadBtn) {
+        uploadBtn.addEventListener('click', async () => {
+            console.log('Upload button clicked');
             
-            const enabledCheckbox = document.getElementById('langtraceEnabled');
-            if (enabledCheckbox) {
-                enabledCheckbox.checked = data.enabled;
-            }
-        } catch (error) {
-            showError('Error loading LangTrace settings: ' + error.message);
-        }
-    }
-
-    async function saveLangTraceSettings() {
-        const enabledCheckbox = document.getElementById('langtraceEnabled');
-        const apiKeyInput = document.getElementById('langtraceApiKey');
-        
-        if (!enabledCheckbox) {
-            showError('LangTrace settings elements not found');
-            return;
-        }
-
-        try {
-            const response = await fetch(`${API_BASE_URL}api/langtrace/config`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    enabled: enabledCheckbox.checked,
-                    api_key: apiKeyInput?.value || undefined
-                })
-            });
+            const fileInput = document.getElementById('summaryFile');
+            const file = fileInput.files[0];
+            console.log('Selected file:', file);
             
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
+            if (!file) {
+                console.log('No file selected');
+                showError('Please select a file to upload');
+                return;
             }
             
-            const data = await response.json();
-            if (data.status === 'success') {
-                // Clear API key field
-                if (apiKeyInput) {
-                    apiKeyInput.value = '';
+            if (!file.name.endsWith('.json')) {
+                console.log('Invalid file type:', file.name);
+                showError('Only JSON files are accepted');
+                return;
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append('report', file);
+                const submitUrl = `${API_BASE_URL}api/submit-report`;
+                console.log('Sending request to:', submitUrl);
+                
+                const response = await fetch(submitUrl, {
+                    method: 'POST',
+                    body: formData
+                });
+                console.log('Response received:', response);
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    console.error('Error response:', errorData);
+                    throw new Error(errorData.detail || 'Failed to upload summary');
                 }
-                showSuccess('LangTrace settings saved successfully');
-            } else {
-                showError(data.error || 'Failed to save LangTrace settings');
+                
+                const result = await response.json();
+                console.log('Success response:', result);
+                showSuccess(result.message || 'Summary uploaded successfully');
+                
+                // Clear the file input
+                fileInput.value = '';
+                
+                // Update status with processing info
+                updateStatus(`Processing summary: ${file.name}`, null, false);
+                
+            } catch (error) {
+                console.error('Error uploading summary:', error);
+                showError(error.message || 'Failed to upload summary');
             }
-        } catch (error) {
-            showError('Error saving LangTrace settings: ' + error.message);
-        }
+        });
     }
 
     // API interaction functions
@@ -454,6 +529,71 @@ document.addEventListener('DOMContentLoaded', () => {
         html += '</div>';
         
         quotaDiv.innerHTML = html;
+    }
+
+    // Initialize LangTrace settings
+    const saveLangtraceButton = document.getElementById('saveLangtraceSettings');
+    if (saveLangtraceButton) {
+        saveLangtraceButton.addEventListener('click', saveLangTraceSettings);
+        // Load initial LangTrace settings
+        loadLangTraceSettings();
+    }
+
+    async function loadLangTraceSettings() {
+        try {
+            const response = await fetch(`${API_BASE_URL}api/langtrace/config`);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
+            
+            const enabledCheckbox = document.getElementById('langtraceEnabled');
+            if (enabledCheckbox) {
+                enabledCheckbox.checked = data.enabled;
+            }
+        } catch (error) {
+            showError('Error loading LangTrace settings: ' + error.message);
+        }
+    }
+
+    async function saveLangTraceSettings() {
+        const enabledCheckbox = document.getElementById('langtraceEnabled');
+        const apiKeyInput = document.getElementById('langtraceApiKey');
+        
+        if (!enabledCheckbox) {
+            showError('LangTrace settings elements not found');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE_URL}api/langtrace/config`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    enabled: enabledCheckbox.checked,
+                    api_key: apiKeyInput?.value || undefined
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            if (data.status === 'success') {
+                // Clear API key field
+                if (apiKeyInput) {
+                    apiKeyInput.value = '';
+                }
+                showSuccess('LangTrace settings saved successfully');
+            } else {
+                showError(data.error || 'Failed to save LangTrace settings');
+            }
+        } catch (error) {
+            showError('Error saving LangTrace settings: ' + error.message);
+        }
     }
 
     // Load settings on startup
