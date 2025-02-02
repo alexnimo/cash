@@ -1,0 +1,101 @@
+{
+  "Date": "January 09 2025",
+  "Channel name": "Micha.Stocks",
+  "sections": [
+    {
+      "topic": "Technical Profile: RGT",
+      "stocks": [
+        "RGT"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0065.jpg",
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0445.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "RGT's revenue is low with a decreasing trend, annual revenue of $11 million, raising concerns about its growth potential. The stock experienced a significant price surge from $0.7 to $10 following Google's quantum chip announcement, indicating high volatility. The company faces risks of dilution and potential bankruptcy, making it suitable for day trading but not long-term investment.",
+      "key_points": [
+        "Pattern: Significant price surge from $0.7 to $10 post-Google announcement, followed by a drop.",
+        "Trigger: Google's quantum chip announcement acted as a major catalyst.",
+        "Risk: Low revenue, decreasing trend, high risk of dilution, potential bankruptcy.",
+        "Level: $0.7 and $10 are key historical price levels."
+      ]
+    },
+    {
+      "topic": "Technical Profile: AMD",
+      "stocks": [
+        "AMD"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0300.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "AMD was mentioned in the context of President Biden's plan to further restrict chip exports to China, which negatively impacted the stock. This policy change acts as a volatility catalyst.",
+      "key_points": [
+        "Pattern: Negative reaction to news of chip export restrictions.",
+        "Trigger: Biden's chip export restrictions to China.",
+        "Risk: Policy changes impacting chip exports.",
+        "Level: Not specified"
+      ]
+    },
+    {
+      "topic": "Technical Profile: GOOGL",
+      "stocks": [
+        "GOOGL"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "GOOGL is mentioned as a large company that could potentially acquire smaller quantum computing companies. It is also mentioned as a company that did not come to the market without revenue, unlike the quantum computing stocks discussed. This highlights its stability and established market presence.",
+      "key_points": [
+        "Pattern: Stable market presence with established revenue.",
+        "Trigger: Potential acquisition of smaller quantum computing companies.",
+        "Risk: Lower risk compared to smaller quantum computing stocks.",
+        "Level: Not specified"
+      ]
+    },
+    {
+      "topic": "Technical Profile: PLTR",
+      "stocks": [
+        "PLTR"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "PLTR is mentioned in the context of companies with high losses, highlighting the risks of investing in such companies. This suggests a potential for dilution and volatility.",
+      "key_points": [
+        "Pattern: High risk due to high losses.",
+        "Trigger: Potential for dilution of existing shareholders.",
+        "Risk: High losses and potential for dilution.",
+        "Level: Not specified"
+      ]
+    },
+    {
+      "topic": "Technical Profile: SOFI",
+      "stocks": [
+        "SOFI"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "SOFI is mentioned in the context of companies with high losses, highlighting the risks of investing in such companies. This suggests a potential for dilution and volatility.",
+      "key_points": [
+        "Pattern: High risk due to high losses.",
+        "Trigger: Potential for dilution of existing shareholders.",
+        "Risk: High losses and potential for dilution.",
+        "Level: Not specified"
+      ]
+    },
+    {
+      "topic": "Technical Profile: TSLA",
+      "stocks": [
+        "TSLA"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "TSLA is mentioned as a company that did not come to the market without revenue, unlike the quantum computing stocks discussed. This highlights its stability and established market presence.",
+      "key_points": [
+        "Pattern: Stable market presence with established revenue.",
+        "Trigger: Not specified.",
+        "Risk: Lower risk compared to smaller quantum computing stocks.",
+        "Level: Not specified"
+      ]
+    }
+  ]
+}

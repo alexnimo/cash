@@ -1,0 +1,101 @@
+{
+  "Date": "January 09 2025",
+  "Channel name": "Micha.Stocks",
+  "sections": [
+    {
+      "topic": "Technical Profile: RGT",
+      "stocks": [
+        "RGT"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0065.jpg",
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0445.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "RGT's revenue is low with a decreasing trend, annual revenue of $11 million, raising concerns about its growth potential. The stock experienced a significant price surge from $0.7 to $10 following Google's quantum chip announcement, indicating high volatility. The company faces risks of dilution and potential bankruptcy, making it suitable for day trading but not long-term investment.",
+      "key_points": [
+        "Pattern: Significant price surge from $0.7 to $10 post-Google announcement, followed by a drop.",
+        "Trigger: Google's quantum chip announcement acted as a volatility catalyst.",
+        "Risk: Low revenue, decreasing trend, high risk of dilution, potential bankruptcy.",
+        "Level: $10 as a historical high, $0.7 as a historical low."
+      ]
+    },
+    {
+      "topic": "Technical Profile: AMD",
+      "stocks": [
+        "AMD"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0300.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "AMD is impacted by news of President Biden's plan to further restrict chip exports to China. This policy change acts as a volatility catalyst for the stock.",
+      "key_points": [
+        "Pattern: Negative reaction to chip export restrictions.",
+        "Trigger: Biden's chip export restrictions.",
+        "Risk: Policy changes impacting stock price.",
+        "Level: Not specified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: GOOGL",
+      "stocks": [
+        "GOOGL"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "GOOGL's quantum chip announcement acted as a catalyst for a surge in quantum computing stocks, including RGT. GOOGL is also mentioned as a potential acquirer of smaller quantum computing companies. GOOGL is also mentioned as a company that came to the market with revenue.",
+      "key_points": [
+        "Pattern: Catalyst for quantum computing stock surge.",
+        "Trigger: Quantum chip announcement.",
+        "Risk: Potential acquisition of smaller companies.",
+        "Level: Not specified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: SOFI",
+      "stocks": [
+        "SOFI"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "SOFI is mentioned in the context of high-loss companies, indicating potential risks associated with its financial performance.",
+      "key_points": [
+        "Pattern: Not specified.",
+        "Trigger: Not specified.",
+        "Risk: High losses, potential for dilution.",
+        "Level: Not specified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: PLTR",
+      "stocks": [
+        "PLTR"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "PLTR is mentioned in the context of high-loss companies, indicating potential risks associated with its financial performance.",
+      "key_points": [
+        "Pattern: Not specified.",
+        "Trigger: Not specified.",
+        "Risk: High losses, potential for dilution.",
+        "Level: Not specified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: TSLA",
+      "stocks": [
+        "TSLA"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "TSLA is mentioned as a company that came to the market with revenue, in contrast to the quantum computing stocks being discussed.",
+      "key_points": [
+        "Pattern: Not specified.",
+        "Trigger: Not specified.",
+        "Risk: Not specified.",
+        "Level: Not specified."
+      ]
+    }
+  ]
+}

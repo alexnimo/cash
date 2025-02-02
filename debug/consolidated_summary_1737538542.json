@@ -1,0 +1,101 @@
+{
+  "Date": "January 09 2025",
+  "Channel name": "Micha.Stocks",
+  "sections": [
+    {
+      "topic": "Technical Profile: RGT",
+      "stocks": [
+        "RGT"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0065.jpg",
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0445.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "RGT's revenue is low with a decreasing trend, annual revenue of $11 million, raising concerns about its growth potential. The stock experienced a significant price surge from $0.7 to $10 following Google's quantum chip announcement, indicating high volatility. The company faces risks of dilution and potential bankruptcy, making it suitable for day trading but not long-term investment.",
+      "key_points": [
+        "Pattern: Significant price surge from $0.7 to $10 post-Google announcement, followed by a decline.",
+        "Trigger: Google's quantum chip announcement acted as a major volatility catalyst.",
+        "Risk: Low revenue, decreasing trend, high risk of dilution, potential bankruptcy.",
+        "Level: $10 as a historical high, $0.7 as a historical low."
+      ]
+    },
+    {
+      "topic": "Technical Profile: AMD",
+      "stocks": [
+        "AMD"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0300.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "AMD is mentioned in the context of President Biden's plan to further restrict chip exports to China, which could negatively impact the stock. This policy change acts as a volatility catalyst. The stock is also mentioned in the context of larger companies that did not come to the market without revenue, suggesting a comparison to companies with more established financials.",
+      "key_points": [
+        "Pattern: Potential negative impact due to chip export restrictions.",
+        "Trigger: Biden's chip export restrictions to China.",
+        "Risk: Policy changes impacting stock price.",
+        "Level: No specific levels mentioned, but policy changes could create new support/resistance levels."
+      ]
+    },
+    {
+      "topic": "Technical Profile: GOOGL",
+      "stocks": [
+        "GOOGL"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "GOOGL is mentioned as a larger company that could potentially acquire smaller quantum computing companies. It is also mentioned as a company that did not come to the market without revenue, suggesting a comparison to companies with more established financials. The company's quantum chip announcement acted as a catalyst for other quantum computing stocks.",
+      "key_points": [
+        "Pattern: Potential for acquisitions of smaller quantum computing companies.",
+        "Trigger: Google's quantum chip announcement acted as a catalyst for other quantum computing stocks.",
+        "Risk: No specific risks mentioned, but potential for acquisitions could impact stock price.",
+        "Level: No specific levels mentioned, but the company's financial stability is highlighted."
+      ]
+    },
+    {
+      "topic": "Technical Profile: SOFI",
+      "stocks": [
+        "SOFI"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "SOFI is mentioned in the context of companies with high losses, suggesting a potential risk of dilution and a disadvantage for retail investors. The company is grouped with other high-loss companies, indicating a potential for volatility and risk.",
+      "key_points": [
+        "Pattern: High-loss company with potential for dilution.",
+        "Trigger: No specific trigger mentioned, but grouped with other high-loss companies.",
+        "Risk: Potential for dilution, disadvantage for retail investors.",
+        "Level: No specific levels mentioned, but the company's financial situation is highlighted."
+      ]
+    },
+    {
+      "topic": "Technical Profile: PLTR",
+      "stocks": [
+        "PLTR"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "PLTR is mentioned in the context of companies with high losses, suggesting a potential risk of dilution and a disadvantage for retail investors. The company is grouped with other high-loss companies, indicating a potential for volatility and risk.",
+      "key_points": [
+        "Pattern: High-loss company with potential for dilution.",
+        "Trigger: No specific trigger mentioned, but grouped with other high-loss companies.",
+        "Risk: Potential for dilution, disadvantage for retail investors.",
+        "Level: No specific levels mentioned, but the company's financial situation is highlighted."
+      ]
+    },
+    {
+      "topic": "Technical Profile: TSLA",
+      "stocks": [
+        "TSLA"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "TSLA is mentioned as a company that did not come to the market without revenue, suggesting a comparison to companies with more established financials. This implies a contrast with the quantum computing stocks being analyzed, which are noted for their low revenue and high losses.",
+      "key_points": [
+        "Pattern: Established company with revenue at IPO.",
+        "Trigger: No specific trigger mentioned, but used as a comparison to other companies.",
+        "Risk: No specific risks mentioned, but used as a benchmark for financial stability.",
+        "Level: No specific levels mentioned, but the company's financial stability is highlighted."
+      ]
+    }
+  ]
+}
