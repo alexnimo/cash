@@ -305,6 +305,8 @@ class VideoProcessor:
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': True,  # Only extract video URLs without downloading
+                'source_address': '127.0.0.1',  # Force ipv4 to avoid getting 403 errors
+                'cookiefile' : 'cookies.txt',
             }
             
             # Extract video URLs from playlist
@@ -386,7 +388,7 @@ class VideoProcessor:
                 'no_warnings': True,
                 'ignoreerrors': False,
                 'nocheckcertificate': True,
-                'geo_bypass': True
+                'source_address': '0.0.0.0',  # Force IPv4  # Use cookies file
             }
             
             # Download video
