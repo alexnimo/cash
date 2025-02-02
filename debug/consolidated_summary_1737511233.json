@@ -1,0 +1,193 @@
+{
+  "Date": "January 09 2025",
+  "Channel name": "Micha.Stocks",
+  "sections": [
+    {
+      "topic": "Technical Profile: RGT",
+      "stocks": [
+        "RGT"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0065.jpg",
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0445.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "RGT exhibits a concerning financial profile with low and decreasing revenue, both quarterly and annually ($11 million). The stock experienced a significant price surge from $0.7 to $10 following a Google announcement, indicating high volatility and susceptibility to hype. The company's low revenue and lack of profitability raise concerns about its long-term viability and potential for dilution, making it a high-risk investment suitable primarily for day trading.",
+      "key_points": [
+        "Pattern: Significant price surge from $0.7 to $10 driven by hype, followed by a decline.",
+        "Trigger: Google's quantum chip announcement acted as a volatility catalyst.",
+        "Risk: Low revenue, decreasing trend, lack of profitability, potential for dilution, and risk of bankruptcy.",
+        "Level: IPO price of $10, current price around $0.7-$10 range."
+      ]
+    },
+    {
+      "topic": "Technical Profile: SOFI",
+      "stocks": [
+        "SOFI"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "No specific technical analysis was provided for SOFI in this report. The stock was only mentioned in the context of general market risks associated with high-loss companies.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: Potential for dilution and high losses.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: TSLA",
+      "stocks": [
+        "TSLA"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "TSLA was mentioned as a company that, unlike the analyzed quantum computing stocks, did not come to market without revenue. No specific technical analysis was provided.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: AMD",
+      "stocks": [
+        "AMD"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0300.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "AMD was mentioned in the context of President Biden's plan to restrict chip exports to China, which negatively impacted the stock. This policy change acts as a volatility catalyst. No specific price levels or patterns were discussed.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: Biden's chip export restrictions to China.",
+        "Risk: Policy-related volatility.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: RKLB",
+      "stocks": [
+        "RKLB"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "No specific technical analysis was provided for RKLB in this report. The stock was not mentioned.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: PLTR",
+      "stocks": [
+        "PLTR"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "PLTR was mentioned in the context of general market risks associated with high-loss companies. No specific technical analysis was provided.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: Potential for dilution and high losses.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: GOOGL",
+      "stocks": [
+        "GOOGL"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "GOOGL was mentioned as a company that, unlike the analyzed quantum computing stocks, did not come to market without revenue. It was also mentioned as a company that could potentially acquire smaller quantum computing companies. No specific technical analysis was provided.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: Potential acquisition of smaller quantum computing companies.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: COIN",
+      "stocks": [
+        "COIN"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "No specific technical analysis was provided for COIN in this report. The stock was not mentioned.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: BTCUSD",
+      "stocks": [
+        "BTCUSD"
+      ],
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0250.jpg"
+      ],
+      "source": "Composite Analysis",
+      "summary": "Bitcoin's price action was mentioned, with a key support level to watch. It was also noted as a potential market trigger. No specific price levels or patterns were discussed.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: Bitcoin price action as a potential market trigger.",
+        "Risk: No specific risk identified.",
+        "Level: Key support level to watch."
+      ]
+    },
+    {
+      "topic": "Technical Profile: CEG",
+      "stocks": [
+        "CEG"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "No specific technical analysis was provided for CEG in this report. The stock was not mentioned.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: AVGO",
+      "stocks": [
+        "AVGO"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "No specific technical analysis was provided for AVGO in this report. The stock was not mentioned.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    },
+    {
+      "topic": "Technical Profile: ETHUSD",
+      "stocks": [
+        "ETHUSD"
+      ],
+      "frame_paths": [],
+      "source": "Composite Analysis",
+      "summary": "No specific technical analysis was provided for ETHUSD in this report. The stock was not mentioned.",
+      "key_points": [
+        "Pattern: No specific price pattern identified.",
+        "Trigger: No specific volatility trigger identified.",
+        "Risk: No specific risk identified.",
+        "Level: No specific price level identified."
+      ]
+    }
+  ]
+}

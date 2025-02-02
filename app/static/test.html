@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test PDF Analysis</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            white-space: pre-wrap;
+        }
+        .error {
+            color: red;
+            margin-top: 10px;
+        }
+        .loading {
+            display: none;
+            color: #666;
+            margin-top: 10px;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test PDF Analysis</h1>
+    <form id="uploadForm">
+        <div class="form-group">
+            <label for="pdf_file">PDF File:</label>
+            <input type="file" id="pdf_file" name="pdf_file" accept=".pdf" required>
+        </div>
+        <div class="form-group">
+            <label for="json_file">JSON File:</label>
+            <input type="file" id="json_file" name="json_file" accept=".json" required>
+        </div>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" id="split_pdf" name="split_pdf">
+                Split PDF (use for files larger than 35MB)
+            </label>
+        </div>
+        <button type="submit" id="submitBtn">Analyze</button>
+        <div id="loading" class="loading">Analyzing... Please wait...</div>
+    </form>
+    <div id="error" class="error" style="display: none;"></div>
+    <div id="result" class="result" style="display: none;"></div>
+
+    <script>
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const submitBtn = document.getElementById('submitBtn');
+            const loadingDiv = document.getElementById('loading');
+            const resultDiv = document.getElementById('result');
+            const errorDiv = document.getElementById('error');
+            
+            // Clear previous results
+            resultDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
+            
+            // Show loading state
+            submitBtn.disabled = true;
+            loadingDiv.style.display = 'block';
+            
+            try {
+                const formData = new FormData();
+                formData.append('pdf_file', document.getElementById('pdf_file').files[0]);
+                formData.append('json_file', document.getElementById('json_file').files[0]);
+                formData.append('split_pdf', document.getElementById('split_pdf').checked);
+                
+                console.log('Sending request...');
+                const response = await fetch('/api/test/analyze-pdf', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                console.log('Response received:', response.status);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Server error: ${response.status} - ${errorText}`);
+                }
+                
+                const data = await response.json();
+                console.log('Data received:', data);
+                
+                resultDiv.style.display = 'block';
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                console.error('Error:', error);
+                errorDiv.style.display = 'block';
+                errorDiv.textContent = `Error: ${error.message}`;
+            } finally {
+                // Reset UI state
+                submitBtn.disabled = false;
+                loadingDiv.style.display = 'none';
+            }
+        });
+    </script>
+</body>
+</html>

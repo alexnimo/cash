@@ -1,0 +1,480 @@
+{
+  "Date": "January 09 2025",
+  "Channel name": "Micha.Stocks",
+  "Video name": "\u05de\u05e0\u05db\"\u05dc \u05d0\u05e0\u05d1\u05d9\u05d3\u05d9\u05d4 - \"\u05d8\u05d5\u05e2\u05d4 \u05d1\u05e2\u05e0\u05e7\" - \u05de\u05d4 \u05d2\u05e8\u05dd \u05dc\u05de\u05e0\u05d9\u05d5\u05ea \u05d4\u05e7\u05d5\u05d5\u05d0\u05e0\u05d8\u05d5\u05dd \u05dc\u05d4\u05ea\u05e8\u05e1\u05e7 { \u05ea\u05e2\u05e9\u05d5 \u05d0\u05ea \u05d6\u05d4 }",
+  "sections": [
+    {
+      "topic": "market news",
+      "stocks": [],
+      "start_time": 0.4,
+      "end_time": 30.64,
+      "summary": "The first five trading days of January were positive, with the speaker expressing optimism for a continued positive trend throughout the month. There's a mention of the market's behavior and a lighthearted comment about market predictions.",
+      "key_points": [
+        "First five days of January were positive.",
+        "Hope for a positive January overall.",
+        "General market optimism."
+      ],
+      "overall_summary": "The speaker notes the positive start to the year and expresses hope for continued market gains.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0025.jpg"
+      ]
+    },
+    {
+      "topic": "stock analysis",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS"
+      ],
+      "start_time": 33.28,
+      "end_time": 74.72,
+      "summary": "The speaker shifts focus to analyzing quantum computing stocks, planning to examine their financials, market cap changes, and discuss insights with a CEO. There's a mention of a CNBC interview and a general critique of those who dismiss others' opinions.",
+      "key_points": [
+        "Focus on quantum computing stocks.",
+        "Analysis of company financials and market cap.",
+        "Discussion with a CEO planned.",
+        "Critique of dismissive attitudes."
+      ],
+      "overall_summary": "The speaker introduces a deep dive into quantum computing stocks, emphasizing a data-driven approach and planned discussions with industry leaders.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0065.jpg"
+      ]
+    },
+    {
+      "topic": "market context",
+      "stocks": [
+        "SPY",
+        "QQQ",
+        "IWM"
+      ],
+      "start_time": 87.16,
+      "end_time": 226.32,
+      "summary": "The speaker reviews the market performance, noting that the S&P 500 and Nasdaq closed positively, while the Russell 2000 lagged. There's a discussion about the significance of the first five trading days of the year and a mention of sector performance, with materials and healthcare performing well, while communication services and technology underperformed. The speaker also mentions the importance of understanding market trends and not relying on feelings.",
+      "key_points": [
+        "S&P 500 and Nasdaq closed positive.",
+        "Russell 2000 underperformed.",
+        "Significance of the first five trading days.",
+        "Sector performance analysis.",
+        "Importance of data-driven investing."
+      ],
+      "overall_summary": "The speaker provides a market overview, highlighting the performance of major indices and sectors, and emphasizing the importance of data-driven investment decisions.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0120.jpg"
+      ]
+    },
+    {
+      "topic": "market context",
+      "stocks": [],
+      "start_time": 226.32,
+      "end_time": 282.88,
+      "summary": "The speaker discusses the 10-year Treasury bond yield, noting its recent movement and comparing it to April 2024 levels. There's also a mention of Bitcoin's price action and a key support level to watch. The speaker also mentions a potential market trigger related to Bitcoin.",
+      "key_points": [
+        "10-year Treasury bond yield analysis.",
+        "Bitcoin price action and key support level.",
+        "Potential market trigger related to Bitcoin."
+      ],
+      "overall_summary": "The speaker analyzes the bond market and Bitcoin, highlighting key levels and potential market triggers.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0250.jpg"
+      ]
+    },
+    {
+      "topic": "market news",
+      "stocks": [
+        "NVDA",
+        "AMD"
+      ],
+      "start_time": 282.88,
+      "end_time": 337.84,
+      "summary": "The speaker discusses news about President Biden's plan to further restrict chip exports to China, which negatively impacted Nvidia's stock in after-hours trading. There's also a mention of the Federal Reserve's meeting minutes and concerns about the Fed's comments on potential impacts from Trump's policies.",
+      "key_points": [
+        "Biden's chip export restrictions impact on NVDA.",
+        "Federal Reserve meeting minutes analysis.",
+        "Concerns about Fed's comments on Trump's policies."
+      ],
+      "overall_summary": "The speaker covers significant market news, including chip export restrictions and the Fed's meeting minutes, highlighting their potential impact on the market.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0300.jpg"
+      ]
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS"
+      ],
+      "start_time": 397.96,
+      "end_time": 472.12,
+      "summary": "The speaker revisits the quantum computing stocks, mentioning a discussion between analysts and CEOs. The speaker then removes FORM from the list of stocks to analyze, as it is not relevant to the quantum computing sector. The speaker also clarifies that QCOM is a certificate of shadow and therefore not relevant.",
+      "key_points": [
+        "Revisit of quantum computing stocks.",
+        "Discussion between analysts and CEOs.",
+        "Removal of FORM from the list.",
+        "Clarification of QCOM as a certificate of shadow."
+      ],
+      "overall_summary": "The speaker sets the stage for a detailed analysis of specific quantum computing stocks, clarifying the scope of the analysis.",
+      "frame_paths": []
+    },
+    {
+      "topic": "stock analysis",
+      "stocks": [
+        "RGT"
+      ],
+      "start_time": 472.12,
+      "end_time": 541.88,
+      "summary": "The speaker begins analyzing RGT, focusing on its quarterly and annual revenue. The analysis reveals that RGT's revenue is relatively low, with a decreasing trend in quarterly revenue and annual revenue of $11 million. The speaker expresses concern about the low revenue, especially for a company that is supposed to be a high-growth startup.",
+      "key_points": [
+        "Analysis of RGT's quarterly and annual revenue.",
+        "Low revenue compared to expectations.",
+        "Decreasing trend in revenue."
+      ],
+      "overall_summary": "The speaker analyzes RGT's financials, highlighting its low revenue and questioning its growth potential.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0445.jpg"
+      ]
+    },
+    {
+      "topic": "stock analysis",
+      "stocks": [
+        "QBTS"
+      ],
+      "start_time": 541.88,
+      "end_time": 608.12,
+      "summary": "The speaker analyzes QBTS, noting a decrease in both quarterly and annual revenue. The company's annual revenue is $9.4 million, and the speaker notes that while the company is losing money, the low revenue is concerning. The speaker also mentions that QBTS has a market cap of $1.6 billion, which is high considering its low revenue.",
+      "key_points": [
+        "Analysis of QBTS's quarterly and annual revenue.",
+        "Decreasing trend in revenue.",
+        "Low revenue compared to market cap.",
+        "High market cap despite low revenue."
+      ],
+      "overall_summary": "The speaker analyzes QBTS's financials, highlighting its low revenue and high market cap, raising concerns about its valuation.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0480.jpg"
+      ]
+    },
+    {
+      "topic": "stock analysis",
+      "stocks": [
+        "IQ",
+        "QTS"
+      ],
+      "start_time": 608.12,
+      "end_time": 641.24,
+      "summary": "The speaker briefly mentions IQ, noting its higher revenue compared to the previous two stocks, with $37 million in annual revenue. The speaker then analyzes QTS, noting its very low revenue of $380,000 per year. The speaker emphasizes that all of these companies are losing money.",
+      "key_points": [
+        "Brief mention of IQ's revenue.",
+        "Analysis of QTS's very low revenue.",
+        "All companies are losing money."
+      ],
+      "overall_summary": "The speaker briefly analyzes IQ and QTS, highlighting their revenue and noting that all companies are losing money.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS",
+        "NVDA",
+        "GOOG",
+        "SOFI",
+        "PLTR"
+      ],
+      "start_time": 641.24,
+      "end_time": 730.04,
+      "summary": "The speaker discusses the risks of investing in companies with high losses, emphasizing that retail investors are at a disadvantage compared to venture capital firms. The speaker also points out that these companies will likely need to raise more capital, which could dilute existing shareholders. The speaker also criticizes the management of these companies for not raising capital when their stock prices were high.",
+      "key_points": [
+        "Risks of investing in companies with high losses.",
+        "Disadvantage of retail investors compared to venture capital.",
+        "Potential for dilution of existing shareholders.",
+        "Criticism of management for not raising capital when stock prices were high."
+      ],
+      "overall_summary": "The speaker highlights the risks of investing in these quantum computing stocks, emphasizing the disadvantage of retail investors and the potential for dilution.",
+      "frame_paths": []
+    },
+    {
+      "topic": "stock analysis",
+      "stocks": [
+        "QBTS",
+        "QTS"
+      ],
+      "start_time": 730.04,
+      "end_time": 797.84,
+      "summary": "The speaker highlights the dramatic increase in the market cap of QBTS and QTS, noting that QBTS increased tenfold in value and QTS increased from $14 million to $1.3 billion. The speaker criticizes the management of these companies for not raising capital when their stock prices were high, which could have provided them with more cash.",
+      "key_points": [
+        "Dramatic increase in market cap of QBTS and QTS.",
+        "Criticism of management for not raising capital when stock prices were high.",
+        "Potential for dilution of existing shareholders."
+      ],
+      "overall_summary": "The speaker highlights the dramatic increase in the market cap of QBTS and QTS, criticizing management for not capitalizing on the high stock prices.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS",
+        "GOOG",
+        "AAPL",
+        "NVDA",
+        "MSFT",
+        "AMD"
+      ],
+      "start_time": 797.84,
+      "end_time": 886.6,
+      "summary": "The speaker discusses the possibility of one of these companies becoming successful, but emphasizes that it is difficult to predict which one. The speaker also notes that larger companies like Google, Apple, and Nvidia could easily acquire these smaller companies. The speaker warns that investing in these stocks is risky and that investors should be prepared to lose their entire investment. The speaker also mentions that these stocks are suitable for day trading.",
+      "key_points": [
+        "Possibility of one company becoming successful.",
+        "Potential for acquisition by larger companies.",
+        "High risk of losing entire investment.",
+        "Suitability for day trading."
+      ],
+      "overall_summary": "The speaker discusses the risks and potential rewards of investing in these quantum computing stocks, emphasizing the high risk and suitability for day trading.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "QBTS"
+      ],
+      "start_time": 886.6,
+      "end_time": 971.2,
+      "summary": "The speaker introduces an interview with the CEO of DW (QBTS) on CNBC, where the CEO defends his company and the quantum computing sector. The speaker notes that the interview took place after the stock had dropped significantly. The speaker also mentions that the rise in these stocks was triggered by Google's announcement of its quantum chip.",
+      "key_points": [
+        "Introduction of CNBC interview with DW CEO.",
+        "CEO defends his company and the quantum computing sector.",
+        "Interview took place after significant stock drop.",
+        "Rise in stocks triggered by Google's quantum chip announcement."
+      ],
+      "overall_summary": "The speaker introduces an interview with the CEO of DW, highlighting the context of the interview and the market events that led to it.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "QBTS"
+      ],
+      "start_time": 971.2,
+      "end_time": 1037.24,
+      "summary": "The speaker plays a clip of the CNBC interview, where the CEO of DW (QBTS) argues that Jensen (likely referring to Nvidia's CEO) is wrong about the timeline for quantum computing. The CEO claims that quantum computing is closer than people think.",
+      "key_points": [
+        "CEO of DW argues that Jensen is wrong about quantum computing timeline.",
+        "CEO claims quantum computing is closer than people think."
+      ],
+      "overall_summary": "The speaker presents the CEO's argument from the CNBC interview, highlighting his disagreement with Jensen's assessment of the quantum computing timeline.",
+      "frame_paths": []
+    },
+    {
+      "topic": "stock analysis",
+      "stocks": [
+        "QTS"
+      ],
+      "start_time": 1037.24,
+      "end_time": 1089.24,
+      "summary": "The speaker revisits the financials of QTS, noting that its quarterly revenue is $1.87 million and its annual revenue is $9.4 million, with a decreasing trend in recent quarters. The speaker notes that the company's revenue has decreased from $2.9 million to $1.8 million.",
+      "key_points": [
+        "Revisit of QTS's financials.",
+        "Decreasing trend in revenue.",
+        "Decrease in revenue from $2.9 million to $1.8 million."
+      ],
+      "overall_summary": "The speaker revisits QTS's financials, highlighting the decreasing trend in revenue.",
+      "frame_paths": [
+        "/mnt/c/Users/A&O/CascadeProjects/video-analyzer/videos/frames/3d701a15-7f50-403c-bb77-1a041b72c3f1/frame_0445.jpg"
+      ]
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1089.24,
+      "end_time": 1166.4,
+      "summary": "The speaker continues to play the CNBC interview, where the CEO of DW claims that his company is already solving problems that take years with traditional computing in minutes with quantum computing. The CEO also mentions that the company is working on specific use cases, and that the company's technology is already being used by clients. The speaker notes that the CEO is trying to restore the company's reputation.",
+      "key_points": [
+        "CEO claims quantum computing is solving problems in minutes.",
+        "Company is working on specific use cases.",
+        "Company's technology is already being used by clients.",
+        "CEO is trying to restore the company's reputation."
+      ],
+      "overall_summary": "The speaker continues to present the CEO's arguments from the CNBC interview, highlighting the company's claims and the CEO's attempt to restore the company's reputation.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1166.4,
+      "end_time": 1262.64,
+      "summary": "The speaker continues to play the CNBC interview, where the interviewer discusses the different approaches to quantum computing, with some companies focusing on specific use cases and others focusing on a broader approach. The interviewer notes that the CEO of DW is focusing on specific use cases, while companies like Nvidia and Google are focusing on a broader approach.",
+      "key_points": [
+        "Discussion of different approaches to quantum computing.",
+        "Focus on specific use cases vs. broader approach.",
+        "DW CEO focusing on specific use cases.",
+        "Nvidia and Google focusing on a broader approach."
+      ],
+      "overall_summary": "The speaker presents the interviewer's analysis of the different approaches to quantum computing, highlighting the contrasting strategies of DW and other major tech companies.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1262.64,
+      "end_time": 1333.84,
+      "summary": "The speaker continues to play the CNBC interview, where the interviewer and the CEO of DW discuss the company's approach to quantum computing. The CEO claims that his company is taking a different approach and is not just focusing on one specific use case. The speaker notes that the CEO is trying to defend his company and the quantum computing sector.",
+      "key_points": [
+        "DW CEO claims company is taking a different approach.",
+        "Company is not just focusing on one specific use case.",
+        "CEO is trying to defend his company and the quantum computing sector."
+      ],
+      "overall_summary": "The speaker continues to present the CEO's arguments from the CNBC interview, highlighting his defense of the company's approach and the quantum computing sector.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1333.84,
+      "end_time": 1478.32,
+      "summary": "The speaker continues to play the CNBC interview, where the interviewer questions the CEO about the company's low revenue and profitability. The CEO claims that the company's revenue is growing nicely, but he cannot disclose specific results. The CEO also claims that his company is not competing with AI companies, but rather is working on different areas. The CEO also claims that his company's technology is better and more powerful than traditional computing.",
+      "key_points": [
+        "Interviewer questions CEO about low revenue and profitability.",
+        "CEO claims revenue is growing nicely.",
+        "CEO claims company is not competing with AI companies.",
+        "CEO claims company's technology is better and more powerful."
+      ],
+      "overall_summary": "The speaker continues to present the CEO's arguments from the CNBC interview, highlighting the interviewer's questions and the CEO's responses.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1478.32,
+      "end_time": 1554.6,
+      "summary": "The speaker continues to play the CNBC interview, where the interviewer questions the CEO about his claim that Jensen is wrong. The CEO clarifies that he did not mean to say that Jensen is completely wrong, but rather that his company is taking a different approach. The speaker notes that the CEO is trying to correct his previous statement.",
+      "key_points": [
+        "Interviewer questions CEO about his claim that Jensen is wrong.",
+        "CEO clarifies that he did not mean to say that Jensen is completely wrong.",
+        "CEO is trying to correct his previous statement."
+      ],
+      "overall_summary": "The speaker continues to present the CEO's arguments from the CNBC interview, highlighting the interviewer's questions and the CEO's attempt to clarify his previous statement.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1554.6,
+      "end_time": 1605.44,
+      "summary": "The speaker continues to play the CNBC interview, where the CEO of DW claims that his company is providing solutions to clients like Mastercard. The CEO also claims that there are two approaches to quantum computing. The speaker notes that the CEO is trying to defend his company and the quantum computing sector.",
+      "key_points": [
+        "CEO claims company is providing solutions to clients like Mastercard.",
+        "CEO claims there are two approaches to quantum computing.",
+        "CEO is trying to defend his company and the quantum computing sector."
+      ],
+      "overall_summary": "The speaker continues to present the CEO's arguments from the CNBC interview, highlighting his defense of the company and the quantum computing sector.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [],
+      "start_time": 1605.44,
+      "end_time": 1674.44,
+      "summary": "The speaker discusses the timeline for quantum computing, noting that it is a hot and interesting field. The speaker also notes that technology takes time to be implemented, and that the current hype around AI is not new. The speaker also questions whether it is the CEO's job to go on CNBC and make these claims.",
+      "key_points": [
+        "Discussion of the timeline for quantum computing.",
+        "Technology takes time to be implemented.",
+        "Current hype around AI is not new.",
+        "Question of whether it is the CEO's job to go on CNBC and make these claims."
+      ],
+      "overall_summary": "The speaker discusses the timeline for quantum computing and questions the CEO's decision to go on CNBC to make these claims.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS"
+      ],
+      "start_time": 1674.44,
+      "end_time": 1704.6,
+      "summary": "The speaker questions whether it is the investor's job to protect their money or gamble with it. The speaker notes that there are a group of stocks that are suitable for day trading, but not for long-term investment. The speaker also notes that events can happen that can cause these stocks to drop significantly. The speaker also notes that the chance of a large company dropping 40% is much smaller than the chance of these smaller companies dropping 40%.",
+      "key_points": [
+        "Question of whether it is the investor's job to protect their money or gamble with it.",
+        "Stocks are suitable for day trading, not long-term investment.",
+        "Events can cause these stocks to drop significantly.",
+        "Chance of large company dropping 40% is much smaller."
+      ],
+      "overall_summary": "The speaker discusses the risks of investing in these quantum computing stocks, emphasizing their suitability for day trading and the potential for significant losses.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS"
+      ],
+      "start_time": 1704.6,
+      "end_time": 1771.68,
+      "summary": "The speaker discusses the possibility of these stocks going back up, but also notes that they could go to zero. The speaker notes that these companies came to the market with a guarantee of $10 per share, but have since dropped significantly. The speaker notes that there is no guarantee that these stocks will go back up, and that investors should be prepared to lose their entire investment. The speaker uses DW (QBTS) as an example, noting that it dropped from $61 to $0.8 or $1.4.",
+      "key_points": [
+        "Possibility of stocks going back up, but also possibility of going to zero.",
+        "Companies came to market with a guarantee of $10 per share.",
+        "No guarantee that stocks will go back up.",
+        "Investors should be prepared to lose their entire investment.",
+        "DW (QBTS) dropped from $61 to $0.8 or $1.4."
+      ],
+      "overall_summary": "The speaker discusses the risks of investing in these quantum computing stocks, emphasizing the potential for significant losses and the lack of guarantees.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT"
+      ],
+      "start_time": 1771.68,
+      "end_time": 1818.4,
+      "summary": "The speaker uses RGT as an example, noting that it went from $0.7 to $10 after Google announced its quantum chip. The speaker notes that this is an example of hype, and that investors should be able to identify these situations. The speaker also notes that it is possible to trade these stocks, but that investors should not put all of their money into them. The speaker also notes that some of these companies could go bankrupt. The speaker uses QuantumScape as an example of a company that was once hyped but has since dropped significantly.",
+      "key_points": [
+        "RGT went from $0.7 to $10 after Google's announcement.",
+        "This is an example of hype.",
+        "Investors should be able to identify these situations.",
+        "Possible to trade these stocks, but not to put all money into them.",
+        "Some of these companies could go bankrupt.",
+        "QuantumScape as an example of a hyped company that dropped significantly."
+      ],
+      "overall_summary": "The speaker uses RGT and QuantumScape as examples to illustrate the risks of investing in hyped stocks and the potential for significant losses.",
+      "frame_paths": []
+    },
+    {
+      "topic": "trading context",
+      "stocks": [
+        "RGT",
+        "QBTS",
+        "IQ",
+        "QTS",
+        "AAPL",
+        "MSFT",
+        "GOOG",
+        "TSLA"
+      ],
+      "start_time": 1818.4,
+      "end_time": 1954.67,
+      "summary": "The speaker notes that these types of stocks have a history of going up and down, and that this is not the first time this has happened. The speaker questions whether this time is different. The speaker notes that Apple, Microsoft, Google, and Tesla did not come to the market without revenue. The speaker notes that these companies are not growing and are not profitable. The speaker concludes by saying that investors should think about what they are buying. The speaker also notes that he does not know whether investors should sell or not, but that they should be prepared to lose all of their money. The speaker also notes that it is possible that these stocks will go to zero.",
+      "key_points": [
+        "These types of stocks have a history of going up and down.",
+        "Apple, Microsoft, Google, and Tesla did not come to the market without revenue.",
+        "These companies are not growing and are not profitable.",
+        "Investors should think about what they are buying.",
+        "Investors should be prepared to lose all of their money.",
+        "Possible that these stocks will go to zero."
+      ],
+      "overall_summary": "The speaker concludes by reiterating the risks of investing in these quantum computing stocks, emphasizing the lack of revenue and profitability, and the potential for significant losses.",
+      "frame_paths": []
+    }
+  ]
+}
