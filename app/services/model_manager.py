@@ -17,6 +17,8 @@ import logging
 import time
 import asyncio
 from datetime import timedelta
+from llama_index.llms.gemini import Gemini
+from llama_index.llms.openai import OpenAI
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -512,6 +514,29 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Failed to upload file to Gemini: {str(e)}", exc_info=True)
             raise
+
+    @staticmethod
+    def create_llm(config: dict):
+        """Create LLM instance based on config"""
+        provider = config.get('provider', 'gemini')
+        model = config.get('model', 'models/gemini-2.0-flash-exp')
+        
+        if provider.lower() == 'gemini':
+            return Gemini(
+                model_name=model,
+                api_key=os.getenv("GEMINI_API_KEY"),
+                temperature=config.get('temperature', 0.3),
+                max_tokens=config.get('max_tokens', 32000)
+            )
+        elif provider.lower() == 'openai':
+            return OpenAI(
+                model=model,
+                api_key=os.getenv("OPENAI_API_KEY"),
+                temperature=config.get('temperature', 0.3),
+                max_tokens=config.get('max_tokens', 32000)
+            )
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
 
 class QuotaExceededError(Exception):
     """Raised when API quota is exhausted"""
