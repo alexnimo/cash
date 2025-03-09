@@ -85,9 +85,27 @@ video_storage:
 notion:
   api_key: "${NOTION_API_KEY}"
   database_id: "${NOTION_DATABASE_ID}"
-  stock_ticker_property: "Stock Ticker"
-  charts_property: "Charts"
-  ta_summary_property: "TA Summary"
+  properties:
+    stock_ticker:
+      name: "Stock Ticker"
+      type: "title"
+    ta_summary:
+      name: "TA Summary"
+      type: "rich_text"
+    key_points:
+      name: "Highlights"
+      type: "rich_text"
+    charts:
+      name: "Charts"
+      type: "files"
+  default_values: {}
+
+# Notion configuration section
+notion_config:
+  page_size: 100
+  timeout: 30000
+  retry_count: 3
+  retry_delay: 500
 
 # Agent settings
 agents:
