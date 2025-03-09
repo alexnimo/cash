@@ -24,7 +24,7 @@ AGENT_CONFIG: Dict[str, Any] = {
             'provider': 'gemini',  # One of: openai, gemini, sambanova, openai_like
             'model': 'models/gemini-2.0-flash-thinking-exp-1219',  # Default Gemini model
             'temperature': 0.7,
-            'max_tokens': 32000,
+            'max_tokens': 128000,
             # Optional provider-specific settings
             'api_key': None,  # Set in environment variables
             'api_base': None,  # For openai_like
@@ -42,7 +42,7 @@ AGENT_CONFIG: Dict[str, Any] = {
     'notion': {
         'llm': {
             'provider': 'gemini',
-            'model': 'models/gemini-1.5-flash',
+            'model': 'models/gemini-2.0-flash-exp',
             'temperature': 0.7,
             'max_tokens': 128000
         },
@@ -50,17 +50,18 @@ AGENT_CONFIG: Dict[str, Any] = {
         'page_structure': {
             'database_id': '',  # Set this in environment variables
             'properties': {
-                'Name': 'title',
+                'Stock Ticker': 'title',  
                 'Status': 'select',
                 'Type': 'select',
                 'Date': 'date',
-                'Summary': 'rich_text',
+                'TA Summary': 'rich_text',  
                 'Key Points': 'rich_text',
+                'Charts': 'files',  
                 'Stocks': 'multi_select',
                 'Source': 'select'
             },
-            'technical_analysis': ['summary', 'key_points', 'charts'],
-            'market_insights': ['summary', 'key_points', 'charts']
+            'technical_analysis': ['TA Summary', 'Key Points', 'Charts'],  
+            'market_insights': ['TA Summary', 'Key Points', 'Charts']  
         },
         'system_prompt': """You are a Notion Database Expert responsible for creating and updating structured financial analysis content."""
     },
@@ -68,7 +69,7 @@ AGENT_CONFIG: Dict[str, Any] = {
     'technical_analysis': {
         'llm': {
             'provider': 'gemini',
-            'model': 'models/gemini-1.5-flash',
+            'model': 'models/gemini-2.0-flash-exp',
             'temperature': 0.7,
             'max_tokens': 128000
         },

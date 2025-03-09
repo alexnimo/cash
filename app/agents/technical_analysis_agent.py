@@ -5,17 +5,29 @@ import time
 from pathlib import Path
 import google.generativeai as genai
 from app.core.settings import get_settings
-from app.tools.notion_tool import NotionTool
+from app.tools.notion_tool_v2 import NotionTool
 from app.utils.langtrace_utils import get_langtrace, trace_llm_call, init_langtrace
 
 logger = logging.getLogger(__name__)
 
 
 class TechnicalAnalysisAgent:
-    def __init__(self):
+    def __init__(self, tools=None, llm=None, memory=None, config=None):
         """Initialize the TechnicalAnalysisAgent."""
         self.settings = get_settings()
-        self.notion = NotionTool()
+        
+        # Use provided tools if available, otherwise create our own
+        if tools:
+            # Find NotionTool among the provided tools
+            for tool in tools:
+                if isinstance(tool, NotionTool):
+                    self.notion = tool
+                    break
+            else:
+                # If no NotionTool found in provided tools, create a new one
+                self.notion = NotionTool()
+        else:
+            self.notion = NotionTool()
         
         # Initialize model
         model_name = self.settings.agents.llm.name

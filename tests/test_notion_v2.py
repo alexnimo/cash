@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import Mock, patch
-from app.tools.notion_tool_v2 import NotionAdvancedToolSpec
+from app.tools.notion_tool_v2 import NotionTool, NotionAdvancedToolSpec
 from datetime import datetime
 
 @pytest.fixture
@@ -14,7 +14,7 @@ def notion_tool(mock_notion):
         'NOTION_API_KEY': 'test-key',
         'NOTION_DATABASE_ID': 'test-db'
     }):
-        return NotionAdvancedToolSpec()
+        return NotionTool()
 
 def test_create_technical_analysis_section(notion_tool, mock_notion):
     mock_blocks = Mock()

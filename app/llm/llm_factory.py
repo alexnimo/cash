@@ -5,8 +5,13 @@ from llama_index.llms.gemini import Gemini
 from llama_index.llms.openai_like import OpenAILike
 import os
 import logging
+import agentops
+
+agentops_api_key = os.getenv("AGENTOPS_API_KEY")
+
 
 logger = logging.getLogger(__name__)
+agentops.init(agentops_api_key)
 
 class LLMFactory:
     """Factory class for creating LLM instances"""

@@ -13,6 +13,7 @@ import os
 import logging
 import json
 import time
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -249,14 +250,20 @@ class PineconeAdvancedToolSpec(BaseTool):
                     **node.metadata
                 }
                 
-                # Add doc_id if available, otherwise use node index
-                if hasattr(node, 'doc_id'):
-                    node_metadata['doc_id'] = node.doc_id
-                else:
-                    node_metadata['doc_id'] = f"doc_{i}"
+                # Create a stable, unique ID based on content and metadata
+                content_hash = hashlib.md5(node.text.encode()).hexdigest()
+                metadata_str = json.dumps(sorted(node_metadata.items()))
+                metadata_hash = hashlib.md5(metadata_str.encode()).hexdigest()
+                stable_id = f"{content_hash}_{metadata_hash}"
+                node_metadata['doc_id'] = stable_id
                 
                 # Create vector tuple (id, values, metadata)
-                vectors.append((f"node_{i}", embedding, node_metadata))
+                vectors.append((stable_id, embedding, node_metadata))
+            
+            # Log vectors being upserted
+            logger.info(f"Upserting {len(vectors)} vectors to Pinecone")
+            for vid, _, meta in vectors:
+                logger.info(f"Vector ID: {vid}, Metadata: {meta.get('stocks', [])}, Channel: {meta.get('channel_name')}")
             
             # Upsert to Pinecone
             self.index.upsert(vectors=vectors)
@@ -267,7 +274,7 @@ class PineconeAdvancedToolSpec(BaseTool):
             logger.error(f"Error processing documents: {str(e)}")
             return False
 
-    async def query_similar(self, query_text: str, top_k: int = 5) -> List[Dict]:
+    async def query_similar(self, query_text: str, top_k: int = 5, filter: Optional[Dict] = None) -> List[Dict]:
         """Query similar documents"""
         try:
             # Get query embedding
@@ -277,6 +284,7 @@ class PineconeAdvancedToolSpec(BaseTool):
             query_response = self.index.query(
                 vector=query_embedding,
                 top_k=top_k,
+                filter=filter,
                 include_metadata=True
             )
             
@@ -325,7 +333,7 @@ class PineconeAdvancedToolSpec(BaseTool):
             if operation == "upsert":
                 return await self.process_documents(data.get("documents", []))
             elif operation == "query":
-                return await self.query_similar(data.get("query_text", ""), data.get("top_k", 5))
+                return await self.query_similar(data.get("query_text", ""), data.get("top_k", 5), data.get("filter"))
             elif operation == "delete":
                 return {"result": "Not implemented"}
             elif operation == "index_exists":

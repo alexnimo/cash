@@ -135,7 +135,7 @@ async def get_ta_agent():
     global _ta_agent
     if _ta_agent is None:
         # Initialize required tools
-        notion_tool = notion_tool_v2.NotionAdvancedToolSpec()
+        notion_tool = notion_tool_v2.NotionTool()
         tools = [notion_tool]
         
         _ta_agent = TechnicalAnalysisAgent(
