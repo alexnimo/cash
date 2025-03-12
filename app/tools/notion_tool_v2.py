@@ -461,11 +461,46 @@ WORKFLOW STEPS:
                 page = results["results"][0]
                 page_id = page["id"]
                 
-                # Update properties
-                await self.notion.pages.update(
-                    page_id=page_id,
-                    properties=self._create_page_properties(ticker, content)
-                )
+                # First get the page to check which properties actually exist
+                page_details = await self.notion.pages.retrieve(page_id=page_id)
+                existing_properties = page_details.get("properties", {})
+                valid_properties = {}
+                
+                # Property names
+                ta_summary_name = self.properties.get("ta_summary", {}).get("name", "TA Summary")
+                key_points_name = self.properties.get("key_points", {}).get("name", "Key Points") 
+                date_name = self.properties.get("date", {}).get("name", "Date")
+                source_name = self.properties.get("source", {}).get("name", "Source")
+                
+                # Only add properties that exist
+                if ta_summary_name in existing_properties:
+                    valid_properties[ta_summary_name] = {
+                        "rich_text": [{"text": {"content": content.get("summary", "")[:2000]}}]
+                    }
+                
+                if key_points_name in existing_properties:
+                    key_points_text = "\n• " + "\n• ".join(content.get("key_points", []))
+                    valid_properties[key_points_name] = {
+                        "rich_text": [{"text": {"content": key_points_text[:2000]}}]
+                    }
+                
+                if date_name in existing_properties:
+                    valid_properties[date_name] = {
+                        "date": {"start": datetime.now().isoformat()}
+                    }
+                
+                if source_name in existing_properties:
+                    valid_properties[source_name] = {
+                        "select": {"name": "AI Analysis"}
+                    }
+                
+                # Update properties if any valid ones exist
+                if valid_properties:
+                    # Update properties
+                    await self.notion.pages.update(
+                        page_id=page_id,
+                        properties=valid_properties
+                    )
                 
                 # Upload and attach frames if present
                 if frame_paths:
@@ -482,6 +517,22 @@ WORKFLOW STEPS:
                                 logger.error(f"Failed to upload frame to freeimage: {frame_path}")
                         except Exception as e:
                             logger.error(f"Error processing frame {frame_path}: {str(e)}")
+                
+                # Also update the page content with blocks
+                try:
+                    # Instead of creating blocks directly, use the _update_page_with_ta_content method
+                    # This will ensure that content is properly organized under Technical Analysis
+                    await self._update_page_with_ta_content(
+                        page_id=page_id,
+                        summary=content.get("summary", ""),
+                        key_points=content.get("key_points", []),
+                        channel_name=content.get("channel_name", "Unknown Channel")
+                    )
+                    logger.info("Successfully updated page content using _update_page_with_ta_content")
+                except Exception as block_error:
+                    logger.error(f"Error adding content blocks to page: {str(block_error)}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    # Continue even if block update fails
                 
                 return {"status": "success", "page_id": page_id}
             else:
@@ -555,8 +606,7 @@ WORKFLOW STEPS:
                         title_content = prop_value.get('title', [{}])[0].get('text', {}).get('content', '')
                         if title_content:
                             tracked_stocks.append(title_content)
-                            break
-                            
+            
             # Log as a properly formatted string
             if tracked_stocks:
                 stocks_str = ", ".join(tracked_stocks)
@@ -598,6 +648,11 @@ WORKFLOW STEPS:
             page = await self.notion.pages.retrieve(page_id=page_id)
             existing_properties = page.get("properties", {})
             
+            # Debug message to show database properties
+            logger.info(f"Database properties: {list(self.properties.keys())}")
+            logger.info(f"Available properties in database: {self.properties}")
+            logger.info(f"Existing page properties: {list(existing_properties.keys())}")
+            
             # Process content
             if isinstance(content, str):
                 try:
@@ -612,7 +667,7 @@ WORKFLOW STEPS:
             
             # Format key points as bulleted list if it's a list
             if isinstance(key_points, list):
-                key_points_text = "\n".join([f"• {point}" for point in key_points])
+                key_points_text = "\n• " + "\n• ".join(key_points)
             else:
                 key_points_text = key_points
                 
@@ -632,7 +687,7 @@ WORKFLOW STEPS:
                 }
                 logger.info(f"Will update '{ta_summary_name}' property")
             else:
-                logger.warning(f"Property '{ta_summary_name}' doesn't exist in the database")
+                logger.info(f"Property '{ta_summary_name}' doesn't exist in the database")
                 
             if key_points_name in existing_properties:
                 update_props[key_points_name] = {
@@ -640,7 +695,7 @@ WORKFLOW STEPS:
                 }
                 logger.info(f"Will update '{key_points_name}' property")
             else:
-                logger.warning(f"Property '{key_points_name}' doesn't exist in the database")
+                logger.info(f"Property '{key_points_name}' doesn't exist in the database")
                 
             if date_name in existing_properties:
                 update_props[date_name] = {
@@ -648,17 +703,26 @@ WORKFLOW STEPS:
                 }
                 logger.info(f"Will update '{date_name}' property")
             else:
-                logger.warning(f"Property '{date_name}' doesn't exist in the database")
+                logger.info(f"Property '{date_name}' doesn't exist in the database")
             
             # Add channel name if provided and if the property exists
             if channel_name and source_name in existing_properties:
-                update_props[source_name] = {
-                    "select": {"name": channel_name}
-                }
-                logger.info(f"Will update '{source_name}' property")
+                # Check if the property is multi_select type based on debug info
+                source_prop_type = existing_properties.get(source_name, {}).get('type', '')
+                logger.info(f"Source property '{source_name}' has type: {source_prop_type}")
+                
+                if source_prop_type == 'multi_select':
+                    update_props[source_name] = {
+                        "multi_select": [{"name": channel_name}]
+                    }
+                else:
+                    update_props[source_name] = {
+                        "select": {"name": channel_name}
+                    }
+                logger.info(f"Will update '{source_name}' property with '{channel_name}' as {source_prop_type}")
             else:
                 if channel_name:
-                    logger.warning(f"Property '{source_name}' doesn't exist in the database")
+                    logger.info(f"Property '{source_name}' doesn't exist in the database")
                     
             # Only attempt to update if we have properties to update
             if update_props:
@@ -668,9 +732,25 @@ WORKFLOW STEPS:
                     properties=update_props
                 )
                 
+                # Also update the page content with blocks
+                try:
+                    # Instead of creating blocks directly, use the _update_page_with_ta_content method
+                    # This will ensure that content is properly organized under Technical Analysis
+                    await self._update_page_with_ta_content(
+                        page_id=page_id,
+                        summary=summary,
+                        key_points=key_points if isinstance(key_points, list) else [],
+                        channel_name=channel_name or "Unknown Channel"
+                    )
+                    logger.info("Successfully updated page content using _update_page_with_ta_content")
+                except Exception as block_error:
+                    logger.error(f"Error adding content blocks to page: {str(block_error)}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    # Continue even if block update fails
+                
                 return {"status": "success"}
             else:
-                logger.warning(f"No valid properties to update for page {page_id}")
+                logger.info(f"No valid properties to update for page {page_id}")
                 return {"status": "warning", "message": f"No valid properties to update for page {page_id}"}
             
         except Exception as e:
@@ -892,7 +972,10 @@ WORKFLOW STEPS:
             if results["results"]:
                 # Return existing page
                 page = results["results"][0]
-                return {"status": "success", "page_id": page["id"]}
+                page_id = page["id"]
+                page_url = page.get("url", "")
+                
+                return {"status": "success", "page_id": page_id, "page_url": page_url, "ticker": ticker}
             else:
                 logger.info(f"No existing page found for ticker {ticker}")
                 return {"status": "error", "message": f"No existing page found for ticker {ticker}"}
@@ -968,8 +1051,6 @@ WORKFLOW STEPS:
             "operation": "create_or_update_stock_page",
             "ticker": "TSLA",
             "content": {
-                "Date": "March 5, 2025",
-                "Channel name": "TechAnalysis",
                 "summary": "Tesla showing strong support at current levels",
                 "key_points": [
                     "Support level: $180",
@@ -1102,10 +1183,10 @@ Operations:
                         self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"), {})
                     
                     if ticker_property.get("title"):
-                        title_text = ticker_property["title"][0]["text"]["content"] if ticker_property["title"] else ""
-                        if title_text:
-                            tickers.append(title_text)
-                
+                        title_content = ticker_property["title"][0]["text"]["content"] if ticker_property["title"] else ""
+                        if title_content:
+                            tickers.append(title_content)
+                            
                 # Check if there are more pages
                 has_more = response.get("has_more", False)
                 if has_more:
@@ -1127,9 +1208,7 @@ Operations:
                 "database_id": self.database_id,
                 "filter": {
                     "property": self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"),
-                    "title": {
-                        "equals": ticker.upper()
-                    }
+                    "title": {"equals": ticker.upper()}
                 }
             }
             
@@ -1167,9 +1246,7 @@ Operations:
                 "database_id": self.database_id,
                 "filter": {
                     "property": self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"),
-                    "title": {
-                        "equals": ticker.upper()
-                    }
+                    "title": {"equals": ticker.upper()}
                 }
             }
             
@@ -1189,7 +1266,7 @@ Operations:
             
             # Format key points as bulleted list if it's a list
             if isinstance(key_points, list):
-                key_points_text = "\n• " + "\n• ".join(key_points)
+                key_points_text = "\n".join([f"• {point}" for point in key_points])
             else:
                 key_points_text = key_points
                 
@@ -1197,24 +1274,60 @@ Operations:
             if response.get("results"):
                 page_id = response["results"][0]["id"]
                 
-                # Update properties
-                await self.notion.pages.update(
-                    page_id=page_id,
-                    properties={
-                        self.properties.get("ta_summary", {}).get("name", "TA Summary"): {
-                            "rich_text": [{"text": {"content": summary[:2000]}}]
-                        },
-                        self.properties.get("key_points", {}).get("name", "Key Points"): {
-                            "rich_text": [{"text": {"content": key_points_text[:2000]}}]
-                        },
-                        self.properties.get("date", {}).get("name", "Date"): {
-                            "date": {"start": datetime.now().isoformat()}
-                        },
-                        self.properties.get("source", {}).get("name", "Source"): {
-                            "select": {"name": "AI Analysis"}
-                        }
+                # First get the page to check which properties actually exist
+                page_details = await self.notion.pages.retrieve(page_id=page_id)
+                existing_properties = page_details.get("properties", {})
+                valid_properties = {}
+                
+                # Property names
+                ta_summary_name = self.properties.get("ta_summary", {}).get("name", "TA Summary")
+                key_points_name = self.properties.get("key_points", {}).get("name", "Key Points") 
+                date_name = self.properties.get("date", {}).get("name", "Date")
+                source_name = self.properties.get("source", {}).get("name", "Source")
+                
+                # Only add properties that exist
+                if ta_summary_name in existing_properties:
+                    valid_properties[ta_summary_name] = {
+                        "rich_text": [{"text": {"content": summary[:2000]}}]
                     }
-                )
+                
+                if key_points_name in existing_properties:
+                    valid_properties[key_points_name] = {
+                        "rich_text": [{"text": {"content": key_points_text[:2000]}}]
+                    }
+                
+                if date_name in existing_properties:
+                    valid_properties[date_name] = {
+                        "date": {"start": datetime.now().isoformat()}
+                    }
+                
+                if source_name in existing_properties:
+                    valid_properties[source_name] = {
+                        "select": {"name": "AI Analysis"}
+                    }
+                
+                # Update properties if any valid ones exist
+                if valid_properties:
+                    # Update properties
+                    await self.notion.pages.update(
+                        page_id=page_id,
+                        properties=valid_properties
+                    )
+                
+                # Also update the page content with blocks
+                try:
+                    # Instead of creating blocks directly, use the _update_page_with_ta_content method
+                    # This will ensure that content is properly organized under Technical Analysis
+                    await self._update_page_with_ta_content(
+                        page_id=page_id,
+                        summary=summary,
+                        key_points=key_points if isinstance(key_points, list) else [],
+                        channel_name=content_dict.get("channel_name", "Unknown Channel")
+                    )
+                    logger.info("Successfully updated page content using _update_page_with_ta_content")
+                except Exception as block_error:
+                    logger.error(f"Error adding content blocks to page: {str(block_error)}")
+                    # Continue even if block update fails
                 
                 return {
                     "status": "success",
@@ -1268,6 +1381,11 @@ Operations:
             page = await self.notion.pages.retrieve(page_id=page_id)
             existing_properties = page.get("properties", {})
             
+            # Debug message to show database properties
+            logger.info(f"Database properties: {list(self.properties.keys())}")
+            logger.info(f"Available properties in database: {self.properties}")
+            logger.info(f"Existing page properties: {list(existing_properties.keys())}")
+            
             # Process content
             if isinstance(content, str):
                 try:
@@ -1302,7 +1420,7 @@ Operations:
                 }
                 logger.info(f"Will update '{ta_summary_name}' property")
             else:
-                logger.warning(f"Property '{ta_summary_name}' doesn't exist in the database")
+                logger.info(f"Property '{ta_summary_name}' doesn't exist in the database")
                 
             if key_points_name in existing_properties:
                 update_props[key_points_name] = {
@@ -1310,7 +1428,7 @@ Operations:
                 }
                 logger.info(f"Will update '{key_points_name}' property")
             else:
-                logger.warning(f"Property '{key_points_name}' doesn't exist in the database")
+                logger.info(f"Property '{key_points_name}' doesn't exist in the database")
                 
             if date_name in existing_properties:
                 update_props[date_name] = {
@@ -1318,17 +1436,26 @@ Operations:
                 }
                 logger.info(f"Will update '{date_name}' property")
             else:
-                logger.warning(f"Property '{date_name}' doesn't exist in the database")
+                logger.info(f"Property '{date_name}' doesn't exist in the database")
             
             # Add channel name if provided and if the property exists
             if channel_name and source_name in existing_properties:
-                update_props[source_name] = {
-                    "select": {"name": channel_name}
-                }
-                logger.info(f"Will update '{source_name}' property")
+                # Check if the property is multi_select type based on debug info
+                source_prop_type = existing_properties.get(source_name, {}).get('type', '')
+                logger.info(f"Source property '{source_name}' has type: {source_prop_type}")
+                
+                if source_prop_type == 'multi_select':
+                    update_props[source_name] = {
+                        "multi_select": [{"name": channel_name}]
+                    }
+                else:
+                    update_props[source_name] = {
+                        "select": {"name": channel_name}
+                    }
+                logger.info(f"Will update '{source_name}' property with '{channel_name}' as {source_prop_type}")
             else:
                 if channel_name:
-                    logger.warning(f"Property '{source_name}' doesn't exist in the database")
+                    logger.info(f"Property '{source_name}' doesn't exist in the database")
                     
             # Only attempt to update if we have properties to update
             if update_props:
@@ -1338,13 +1465,28 @@ Operations:
                     properties=update_props
                 )
                 
+                # Also update the page content with blocks
+                try:
+                    # Instead of creating blocks directly, use the _update_page_with_ta_content method
+                    # This will ensure that content is properly organized under Technical Analysis
+                    await self._update_page_with_ta_content(
+                        page_id=page_id,
+                        summary=summary,
+                        key_points=key_points if isinstance(key_points, list) else [],
+                        channel_name=channel_name or "Unknown Channel"
+                    )
+                    logger.info("Successfully updated page content using _update_page_with_ta_content")
+                except Exception as block_error:
+                    logger.error(f"Error adding content blocks to page: {str(block_error)}")
+                    # Continue even if block update fails
+                
                 return {
                     "status": "success",
                     "message": f"Updated technical analysis for page {page_id}",
                     "page_id": page_id
                 }
             else:
-                logger.warning(f"No valid properties to update for page {page_id}")
+                logger.info(f"No valid properties to update for page {page_id}")
                 return {
                     "status": "warning",
                     "message": f"No valid properties to update for page {page_id}",
@@ -1451,14 +1593,12 @@ Operations:
                 if not ticker:
                     return json.dumps({"status": "error", "message": "Missing required parameter: 'ticker'"})
                 result = await self.get_stock_page(ticker)
-                
             elif operation == "create_or_update_stock_page":
                 ticker = kwargs.get('ticker')
                 content = kwargs.get('content')
                 if not ticker or not content:
                     return json.dumps({"status": "error", "message": "Missing required parameters for create_or_update_stock_page"})
                 result = await self.create_or_update_stock_page(ticker, content)
-                
             elif operation == "update_technical_analysis":
                 page_id = kwargs.get('page_id')
                 content = kwargs.get('content')
@@ -1468,7 +1608,6 @@ Operations:
                 result = await self.update_technical_analysis(
                     page_id, content, channel_name
                 )
-                
             elif operation == "add_chart_to_page":
                 page_id = kwargs.get('page_id')
                 image_path = kwargs.get('image_path')
@@ -1480,11 +1619,9 @@ Operations:
                     image_path,
                     description
                 )
-                
             elif operation == "get_all_tickers":
                 result = await self.get_all_tickers()
                 return json.dumps({"status": "success", "tickers": result})
-                
             else:
                 return json.dumps({"status": "error", "message": f"Unknown operation: {operation}"})
             
@@ -1647,3 +1784,264 @@ Operations:
             error_message = f"Error in NotionTool: {str(e)}"
             logger.error(error_message, exc_info=True)
             return json.dumps({"status": "error", "message": error_message})
+
+    def _enhance_text_formatting(self, text):
+        """Format text with rich text features like bold and color for key terms"""
+        # Simple pattern matching for text enhancement
+        if not text:
+            return [{"text": {"content": ""}}]
+            
+        # Check for dollar amounts and percentages to make bold
+        import re
+        
+        parts = []
+        
+        # Look for patterns like $123.45, +10%, -5%, keywords like support/resistance
+        patterns = [
+            # Price patterns
+            (r'\$\d+\.?\d*', {"bold": True, "color": "blue"}),
+            # Percentage patterns
+            (r'\+\d+\.?\d*%', {"bold": True, "color": "green"}),
+            (r'\-\d+\.?\d*%', {"bold": True, "color": "red"}),
+            # Technical terms
+            (r'\b(support|resistance|breakout|breakdown|trend|bullish|bearish)\b', {"bold": True}),
+            # Emphasis on key metrics
+            (r'\b(RSI|MACD|EMA|SMA|volume)\b', {"bold": True, "color": "purple"})
+        ]
+        
+        # Find all matches
+        matches = []
+        for pattern, formatting in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                matches.append((match.start(), match.end(), match.group(), formatting))
+        
+        # Sort matches by position
+        matches.sort(key=lambda x: x[0])
+        
+        # Process the text with matches
+        current_pos = 0
+        for start, end, matched_text, formatting in matches:
+            # Add text before match
+            if start > current_pos:
+                parts.append({"text": {"content": text[current_pos:start]}})
+            
+            # Add formatted match
+            parts.append({"text": {"content": matched_text}, "annotations": formatting})
+            current_pos = end
+        
+        # Add remaining text
+        if current_pos < len(text):
+            parts.append({"text": {"content": text[current_pos:]}})
+        
+        # If no patterns matched, return the original text
+        if not parts:
+            parts = [{"text": {"content": text}}]
+            
+        return parts
+
+    async def _update_page_with_ta_content(self, page_id: str, summary: str, key_points: List[str], channel_name: str):
+        """
+        Update the page content with technical analysis blocks.
+        Creates a nested structure with:
+        - Technical Analysis (main toggle - heading_1 style)
+          - Channel Name (channel toggle - heading_2 style)
+            - Channel content (formatted text)
+        """
+        logger.info(f"Updating page {page_id} with technical analysis content for channel '{channel_name}'")
+        
+        # First check if a Technical Analysis toggle already exists
+        blocks_response = await self.notion.blocks.children.list(block_id=page_id)
+        tech_analysis_block_id = None
+        
+        # Iterate through blocks to find an existing Technical Analysis toggle
+        for block in blocks_response.get("results", []):
+            logger.info(f"Found block of type: {block.get('type')}")
+            if block.get("type") == "toggle":
+                toggle_text = block.get("toggle", {}).get("rich_text", [])
+                for text_item in toggle_text:
+                    content = text_item.get("text", {}).get("content", "")
+                    logger.info(f"Checking toggle text content: '{content}'")
+                    if content == "Technical Analysis":
+                        tech_analysis_block_id = block.get("id")
+                        logger.info(f"Found existing Technical Analysis toggle with ID: {tech_analysis_block_id}")
+                        break
+            if tech_analysis_block_id:
+                break
+        
+        # If Technical Analysis section doesn't exist, create it
+        if not tech_analysis_block_id:
+            logger.info("Creating new Technical Analysis section")
+            ta_response = await self.notion.blocks.children.append(
+                block_id=page_id,
+                children=[{
+                    "object": "block",
+                    "type": "toggle",
+                    "toggle": {
+                        "rich_text": [
+                            {
+                                "type": "text",
+                                "text": {"content": "Technical Analysis"},
+                                "annotations": {"bold": True}
+                            }
+                        ]
+                    }
+                }]
+            )
+            
+            # Get the ID of the newly created Technical Analysis toggle
+            if ta_response.get("results") and len(ta_response.get("results", [])) > 0:
+                tech_analysis_block_id = ta_response.get("results", [])[0].get("id")
+                logger.info(f"Created Technical Analysis toggle with ID: {tech_analysis_block_id}")
+            else:
+                logger.error("Failed to create Technical Analysis toggle")
+                return
+        
+        # Now that we have a Technical Analysis toggle (either existing or new),
+        # check if this channel already exists as a child
+        if tech_analysis_block_id:
+            # List all children of the Technical Analysis toggle
+            children_response = await self.notion.blocks.children.list(block_id=tech_analysis_block_id)
+            ta_children = children_response.get("results", [])
+            
+            # Check for an existing channel section
+            channel_block_id = None
+            for child in ta_children:
+                if child.get("type") == "toggle":
+                    toggle_text = child.get("toggle", {}).get("rich_text", [])
+                    for text_item in toggle_text:
+                        if text_item.get("text", {}).get("content") == channel_name:
+                            channel_block_id = child.get("id")
+                            logger.info(f"Found existing channel section '{channel_name}' with ID: {channel_block_id}")
+                            break
+                if channel_block_id:
+                    break
+            
+            # If channel section exists, delete it to replace it
+            if channel_block_id:
+                logger.info(f"Deleting existing channel section '{channel_name}'")
+                await self.notion.blocks.delete(block_id=channel_block_id)
+            
+            # Create a new channel section toggle
+            logger.info(f"Creating new toggle for channel '{channel_name}'")
+            try:
+                # Make sure we're creating a toggle block for the channel, not a heading
+                channel_response = await self.notion.blocks.children.append(
+                    block_id=tech_analysis_block_id,
+                    children=[{
+                        "object": "block",
+                        "type": "toggle",
+                        "toggle": {
+                            "rich_text": [
+                                {
+                                    "type": "text",
+                                    "text": {"content": channel_name},
+                                    "annotations": {"bold": True, "color": "blue"}
+                                }
+                            ]
+                        }
+                    }]
+                )
+                
+                logger.info(f"Channel response structure: {str(channel_response)[:200]}...")
+                
+                # Get the ID of the newly created channel toggle
+                new_channel_id = None
+                if "results" in channel_response and len(channel_response["results"]) > 0:
+                    new_channel_id = channel_response["results"][0].get("id")
+                    logger.info(f"Created toggle for channel '{channel_name}' with ID: {new_channel_id}")
+                else:
+                    logger.error(f"Failed to get channel ID from response: {str(channel_response)[:500]}")
+                    return
+            except Exception as e:
+                logger.error(f"Error creating channel toggle: {str(e)}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                return
+            
+            # Now add content to the channel toggle section
+            if new_channel_id:
+                # Current date for the update info
+                current_date = datetime.now().strftime("%Y-%m-%d")
+                
+                # Create channel content
+                channel_content = [
+                    # Date info
+                    {
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [
+                                {"type": "text", "text": {"content": "Updated on "}, "annotations": {"italic": True}},
+                                {"type": "text", "text": {"content": current_date}, "annotations": {"bold": True}}
+                            ]
+                        }
+                    },
+                    # Divider
+                    {
+                        "object": "block", 
+                        "type": "divider", 
+                        "divider": {}
+                    }
+                ]
+                
+                # Add summary with enhanced formatting
+                if summary:
+                    channel_content.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": self._enhance_text_formatting(summary)
+                        }
+                    })
+                
+                # Add key points with enhanced formatting
+                if isinstance(key_points, list) and key_points:
+                    # Add subheading for key points
+                    channel_content.append({
+                        "object": "block",
+                        "type": "heading_3",
+                        "heading_3": {
+                            "rich_text": [{"type": "text", "text": {"content": "Key Points"}, "annotations": {"bold": True}}]
+                        }
+                    })
+                    
+                    # Add each key point as a bullet with enhanced formatting
+                    for point in key_points:
+                        channel_content.append({
+                            "object": "block",
+                            "type": "bulleted_list_item",
+                            "bulleted_list_item": {
+                                "rich_text": self._enhance_text_formatting(point)
+                            }
+                        })
+                
+                # Add bottom update date
+                channel_content.append({
+                    "object": "block", 
+                    "type": "divider", 
+                    "divider": {}
+                })
+                
+                channel_content.append({
+                    "object": "block",
+                    "type": "paragraph",
+                    "paragraph": {
+                        "rich_text": [
+                            {"type": "text", "text": {"content": "Last updated: "}, "annotations": {"italic": True}},
+                            {"type": "text", "text": {"content": current_date}, "annotations": {"bold": True}}
+                        ]
+                    }
+                })
+                
+                # Add the content to the channel toggle
+                logger.info(f"Adding content to channel '{channel_name}'")
+                try:
+                    await self.notion.blocks.children.append(
+                        block_id=new_channel_id,
+                        children=channel_content
+                    )
+                    logger.info(f"Successfully added content to channel '{channel_name}'")
+                except Exception as e:
+                    logger.error(f"Error adding content to channel: {str(e)}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.error("No Technical Analysis block ID found, unable to update content")
