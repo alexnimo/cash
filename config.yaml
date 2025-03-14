@@ -89,15 +89,18 @@ notion:
     stock_ticker:
       name: "Stock Ticker"
       type: "title"
-    ta_summary:
-      name: "TA Summary"
-      type: "rich_text"
     key_points:
       name: "Highlights"
       type: "rich_text"
     charts:
       name: "Charts"
       type: "files"
+    update_date:
+      name: "Update Date"
+      type: "date"
+    type:
+      name: "Type"
+      type: "select"
   default_values: {}
 
 # Notion configuration section

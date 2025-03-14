@@ -150,7 +150,10 @@ EXAMPLES:
    {
      "operation": "create_or_update_stock_page",
      "ticker": "TSLA",
-     "content": {"summary": "Technical analysis...", "key_points": [...]}
+     "content": {
+       "summary": "Technical analysis...",
+       "key_points": [...]
+     }
    }
 
 3. Add chart to page:
@@ -675,55 +678,26 @@ WORKFLOW STEPS:
             update_props = {}
             
             # Map our property names to actual property names in the database
-            ta_summary_name = self.properties.get("ta_summary", {}).get("name", "TA Summary")
-            key_points_name = self.properties.get("key_points", {}).get("name", "Key Points") 
-            date_name = self.properties.get("date", {}).get("name", "Date")
-            source_name = self.properties.get("source", {}).get("name", "Source")
+            highlights_name = self.properties.get("key_points", {}).get("name", "Highlights")  # Map key_points to Highlights
+            update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")  # Use Update Date instead of Date
             
             # Check which properties exist before adding them to update_props
-            if ta_summary_name in existing_properties:
-                update_props[ta_summary_name] = {
-                    "rich_text": [{"text": {"content": summary[:2000]}}]
-                }
-                logger.info(f"Will update '{ta_summary_name}' property")
-            else:
-                logger.info(f"Property '{ta_summary_name}' doesn't exist in the database")
-                
-            if key_points_name in existing_properties:
-                update_props[key_points_name] = {
+            if highlights_name in existing_properties:
+                update_props[highlights_name] = {
                     "rich_text": [{"text": {"content": key_points_text[:2000]}}]
                 }
-                logger.info(f"Will update '{key_points_name}' property")
+                logger.info(f"Will update '{highlights_name}' property with key points data")
             else:
-                logger.info(f"Property '{key_points_name}' doesn't exist in the database")
+                logger.info(f"Property '{highlights_name}' doesn't exist in the database")
                 
-            if date_name in existing_properties:
-                update_props[date_name] = {
+            if update_date_name in existing_properties:
+                update_props[update_date_name] = {
                     "date": {"start": datetime.now().isoformat()}
                 }
-                logger.info(f"Will update '{date_name}' property")
+                logger.info(f"Will update '{update_date_name}' property with current date")
             else:
-                logger.info(f"Property '{date_name}' doesn't exist in the database")
+                logger.info(f"Property '{update_date_name}' doesn't exist in the database")
             
-            # Add channel name if provided and if the property exists
-            if channel_name and source_name in existing_properties:
-                # Check if the property is multi_select type based on debug info
-                source_prop_type = existing_properties.get(source_name, {}).get('type', '')
-                logger.info(f"Source property '{source_name}' has type: {source_prop_type}")
-                
-                if source_prop_type == 'multi_select':
-                    update_props[source_name] = {
-                        "multi_select": [{"name": channel_name}]
-                    }
-                else:
-                    update_props[source_name] = {
-                        "select": {"name": channel_name}
-                    }
-                logger.info(f"Will update '{source_name}' property with '{channel_name}' as {source_prop_type}")
-            else:
-                if channel_name:
-                    logger.info(f"Property '{source_name}' doesn't exist in the database")
-                    
             # Only attempt to update if we have properties to update
             if update_props:
                 logger.info(f"Updating page {page_id} with properties: {list(update_props.keys())}")
@@ -745,7 +719,6 @@ WORKFLOW STEPS:
                     logger.info("Successfully updated page content using _update_page_with_ta_content")
                 except Exception as block_error:
                     logger.error(f"Error adding content blocks to page: {str(block_error)}")
-                    logger.error(f"Traceback: {traceback.format_exc()}")
                     # Continue even if block update fails
                 
                 return {"status": "success"}
@@ -1060,7 +1033,7 @@ WORKFLOW STEPS:
             }
         }
         
-        # Example 3: Add chart image
+        # Example 3: Add chart to page
         chart_example = {
             "operation": "add_chart_to_page",
             "page_id": "page_12345",
@@ -1180,7 +1153,7 @@ Operations:
                 # Extract ticker from each page
                 for page in response.get("results", []):
                     ticker_property = page.get("properties", {}).get(
-                        self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"), {})
+                        self.properties.get("stock_ticker", {}).get("name"), {})
                     
                     if ticker_property.get("title"):
                         title_content = ticker_property["title"][0]["text"]["content"] if ticker_property["title"] else ""
@@ -1207,7 +1180,7 @@ Operations:
             query_params = {
                 "database_id": self.database_id,
                 "filter": {
-                    "property": self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"),
+                    "property": self.properties.get("stock_ticker", {}).get("name"),
                     "title": {"equals": ticker.upper()}
                 }
             }
@@ -1241,18 +1214,7 @@ Operations:
         """Create or update a stock page with content."""
         logger.debug(f"NotionTool.create_or_update_stock_page called for ticker: {ticker}")
         try:
-            # First, check if page exists
-            query_params = {
-                "database_id": self.database_id,
-                "filter": {
-                    "property": self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"),
-                    "title": {"equals": ticker.upper()}
-                }
-            }
-            
-            response = await self.notion.databases.query(**query_params)
-            
-            # Content processing
+            # Process content
             if isinstance(content, str):
                 try:
                     content_dict = json.loads(content)
@@ -1269,65 +1231,58 @@ Operations:
                 key_points_text = "\n".join([f"• {point}" for point in key_points])
             else:
                 key_points_text = key_points
+            
+            # Check if page exists
+            page = await self.get_stock_page(ticker)
+            
+            if page:
+                # Update existing page
+                page_id = page.get("id")
+                logger.info(f"Found existing page for {ticker}, updating...")
                 
-            # If page exists, update it
-            if response.get("results"):
-                page_id = response["results"][0]["id"]
+                # Get existing properties to check what's available
+                existing_page = await self.notion.pages.retrieve(page_id=page_id)
+                existing_properties = existing_page.get("properties", {})
                 
-                # First get the page to check which properties actually exist
-                page_details = await self.notion.pages.retrieve(page_id=page_id)
-                existing_properties = page_details.get("properties", {})
+                # Only update properties that exist
                 valid_properties = {}
                 
                 # Property names
-                ta_summary_name = self.properties.get("ta_summary", {}).get("name", "TA Summary")
-                key_points_name = self.properties.get("key_points", {}).get("name", "Key Points") 
-                date_name = self.properties.get("date", {}).get("name", "Date")
-                source_name = self.properties.get("source", {}).get("name", "Source")
+                highlights_name = self.properties.get("key_points", {}).get("name", "Highlights")
+                update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")
                 
                 # Only add properties that exist
-                if ta_summary_name in existing_properties:
-                    valid_properties[ta_summary_name] = {
-                        "rich_text": [{"text": {"content": summary[:2000]}}]
-                    }
-                
-                if key_points_name in existing_properties:
-                    valid_properties[key_points_name] = {
+                if highlights_name in existing_properties:
+                    valid_properties[highlights_name] = {
                         "rich_text": [{"text": {"content": key_points_text[:2000]}}]
                     }
                 
-                if date_name in existing_properties:
-                    valid_properties[date_name] = {
+                if update_date_name in existing_properties:
+                    valid_properties[update_date_name] = {
                         "date": {"start": datetime.now().isoformat()}
                     }
                 
-                if source_name in existing_properties:
-                    valid_properties[source_name] = {
-                        "select": {"name": "AI Analysis"}
-                    }
-                
-                # Update properties if any valid ones exist
+                # Update the page with valid properties
                 if valid_properties:
                     # Update properties
                     await self.notion.pages.update(
                         page_id=page_id,
                         properties=valid_properties
                     )
-                
-                # Also update the page content with blocks
-                try:
-                    # Instead of creating blocks directly, use the _update_page_with_ta_content method
-                    # This will ensure that content is properly organized under Technical Analysis
-                    await self._update_page_with_ta_content(
-                        page_id=page_id,
-                        summary=summary,
-                        key_points=key_points if isinstance(key_points, list) else [],
-                        channel_name=content_dict.get("channel_name", "Unknown Channel")
-                    )
-                    logger.info("Successfully updated page content using _update_page_with_ta_content")
-                except Exception as block_error:
-                    logger.error(f"Error adding content blocks to page: {str(block_error)}")
-                    # Continue even if block update fails
+                    
+                    # Update page content
+                    try:
+                        # Use the _update_page_with_ta_content method for consistency with the toggle functionality
+                        await self._update_page_with_ta_content(
+                            page_id=page_id,
+                            summary=summary,
+                            key_points=key_points if isinstance(key_points, list) else [],
+                            channel_name=content_dict.get("channel_name", "Unknown Channel")
+                        )
+                        logger.info("Successfully updated page content using _update_page_with_ta_content")
+                    except Exception as block_error:
+                        logger.error(f"Error adding content blocks to page: {str(block_error)}")
+                        # Continue even if block update fails
                 
                 return {
                     "status": "success",
@@ -1342,17 +1297,11 @@ Operations:
                     self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"): {
                         "title": [{"text": {"content": ticker.upper()}}]
                     },
-                    self.properties.get("ta_summary", {}).get("name", "TA Summary"): {
-                        "rich_text": [{"text": {"content": summary[:2000]}}]
-                    },
-                    self.properties.get("key_points", {}).get("name", "Key Points"): {
+                    self.properties.get("key_points", {}).get("name", "Highlights"): {
                         "rich_text": [{"text": {"content": key_points_text[:2000]}}]
                     },
-                    self.properties.get("date", {}).get("name", "Date"): {
+                    self.properties.get("update_date", {}).get("name", "Update Date"): {
                         "date": {"start": datetime.now().isoformat()}
-                    },
-                    self.properties.get("source", {}).get("name", "Source"): {
-                        "select": {"name": "AI Analysis"}
                     }
                 }
                 
@@ -1362,6 +1311,20 @@ Operations:
                 )
                 
                 page_id = response["id"]
+                
+                # Also update the page content with Technical Analysis toggle
+                try:
+                    await self._update_page_with_ta_content(
+                        page_id=page_id,
+                        summary=summary,
+                        key_points=key_points if isinstance(key_points, list) else [],
+                        channel_name=content_dict.get("channel_name", "Unknown Channel")
+                    )
+                    logger.info("Successfully added content to new page using _update_page_with_ta_content")
+                except Exception as e:
+                    logger.error(f"Error adding content to new page: {str(e)}")
+                    # Continue even if block update fails
+                
                 return {
                     "status": "success",
                     "message": f"Created new page for {ticker}",
@@ -1407,56 +1370,27 @@ Operations:
             # Prepare properties to update - only include properties that exist
             update_props = {}
             
-            # Map our property names to actual property names in the database
-            ta_summary_name = self.properties.get("ta_summary", {}).get("name", "TA Summary")
-            key_points_name = self.properties.get("key_points", {}).get("name", "Key Points") 
-            date_name = self.properties.get("date", {}).get("name", "Date")
-            source_name = self.properties.get("source", {}).get("name", "Source")
+            # Map property names to actual property names in the database using config
+            highlights_name = self.properties.get("key_points", {}).get("name", "Highlights")  # Map key_points to Highlights
+            update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")  # Use Update Date instead of Date
             
             # Check which properties exist before adding them to update_props
-            if ta_summary_name in existing_properties:
-                update_props[ta_summary_name] = {
-                    "rich_text": [{"text": {"content": summary[:2000]}}]
-                }
-                logger.info(f"Will update '{ta_summary_name}' property")
-            else:
-                logger.info(f"Property '{ta_summary_name}' doesn't exist in the database")
-                
-            if key_points_name in existing_properties:
-                update_props[key_points_name] = {
+            if highlights_name in existing_properties:
+                update_props[highlights_name] = {
                     "rich_text": [{"text": {"content": key_points_text[:2000]}}]
                 }
-                logger.info(f"Will update '{key_points_name}' property")
+                logger.info(f"Will update '{highlights_name}' property with key points data")
             else:
-                logger.info(f"Property '{key_points_name}' doesn't exist in the database")
+                logger.info(f"Property '{highlights_name}' doesn't exist in the database")
                 
-            if date_name in existing_properties:
-                update_props[date_name] = {
+            if update_date_name in existing_properties:
+                update_props[update_date_name] = {
                     "date": {"start": datetime.now().isoformat()}
                 }
-                logger.info(f"Will update '{date_name}' property")
+                logger.info(f"Will update '{update_date_name}' property with current date")
             else:
-                logger.info(f"Property '{date_name}' doesn't exist in the database")
+                logger.info(f"Property '{update_date_name}' doesn't exist in the database")
             
-            # Add channel name if provided and if the property exists
-            if channel_name and source_name in existing_properties:
-                # Check if the property is multi_select type based on debug info
-                source_prop_type = existing_properties.get(source_name, {}).get('type', '')
-                logger.info(f"Source property '{source_name}' has type: {source_prop_type}")
-                
-                if source_prop_type == 'multi_select':
-                    update_props[source_name] = {
-                        "multi_select": [{"name": channel_name}]
-                    }
-                else:
-                    update_props[source_name] = {
-                        "select": {"name": channel_name}
-                    }
-                logger.info(f"Will update '{source_name}' property with '{channel_name}' as {source_prop_type}")
-            else:
-                if channel_name:
-                    logger.info(f"Property '{source_name}' doesn't exist in the database")
-                    
             # Only attempt to update if we have properties to update
             if update_props:
                 logger.info(f"Updating page {page_id} with properties: {list(update_props.keys())}")
