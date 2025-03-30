@@ -7,7 +7,6 @@ model:
   video_analysis:
     type: "gemini"
     name: "gemini-2.0-flash-exp"
-    max_tokens: 1024
     temperature: 0.7
   transcription:
     enabled: true

@@ -1,10 +1,10 @@
 import json
 import logging
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Union
 from pathlib import Path
 import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from google.generativeai.types import GenerationConfig, GenerateContentResponse
 from datetime import datetime, timedelta
 from app.core.config import get_settings
 from app.models.video import Video, VideoStatus
@@ -21,8 +21,148 @@ import re
 from app.services.errors import VideoProcessingError
 from app.services.video_processor import Video
 
+# ANSI color codes for terminal output
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+RESET = "\033[0m"
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+def is_response_truncated(response: GenerateContentResponse) -> bool:
+    """
+    Detects if a response from Gemini API was truncated due to token limits.
+    
+    Args:
+        response: The raw response object from Gemini API
+        
+    Returns:
+        bool: True if the response was truncated, False otherwise
+    """
+    try:
+        # Check if response was truncated due to MAX_TOKENS
+        finish_reason = response.candidates[0].finish_reason
+        is_truncated = finish_reason == 'FINISH_REASON_MAX_TOKENS' or finish_reason == 2
+        
+        if is_truncated:
+            logger.info("Response was truncated due to token limit (FINISH_REASON_MAX_TOKENS)")
+        
+        return is_truncated
+    except (AttributeError, IndexError) as e:
+        logger.warning(f"Could not determine if response was truncated: {str(e)}")
+        return False
+
+
+async def handle_chunked_response(
+    model: Any, 
+    original_prompt: str, 
+    first_response: GenerateContentResponse, 
+    content_generator_kwargs: Dict[str, Any] = None,
+    max_continuation_attempts: int = 5,
+    additional_contents: List[Dict[str, Any]] = None
+) -> str:
+    """
+    Handles chunked responses by continuing the generation until complete.
+    
+    Args:
+        model: The Gemini model instance
+        original_prompt: The original prompt sent to the model
+        first_response: The first (potentially truncated) response from the model
+        content_generator_kwargs: Additional kwargs for model.generate_content
+        max_continuation_attempts: Maximum number of continuation attempts
+        additional_contents: Additional content items (like file_data) to include in continuation requests
+        
+    Returns:
+        str: The complete response text
+    """
+    if not content_generator_kwargs:
+        content_generator_kwargs = {}
+        
+    # Get the text from the first response
+    combined_text = first_response.text.strip()
+    
+    # Check if response is truncated
+    if not is_response_truncated(first_response):
+        print(f"{GREEN}✓ Response is complete (not truncated){RESET}")
+        return combined_text
+    
+    print(f"{YELLOW}! Initial response is truncated. Starting continuation process...{RESET}")
+    
+    # Initialize for continuation
+    current_response = first_response
+    continuation_attempts = 0
+    
+    # Continue generating content until the response is complete or max attempts reached
+    while is_response_truncated(current_response) and continuation_attempts < max_continuation_attempts:
+        continuation_attempts += 1
+        print(f"{YELLOW}! Making continuation request (attempt {continuation_attempts}/{max_continuation_attempts}){RESET}")
+        logger.info(f"Making continuation request (attempt {continuation_attempts}/{max_continuation_attempts})")
+        
+        # Build continuation prompt
+        continuation_prompt = (
+            "Continue from where you have stopped in the following provided response, "
+            "add only the missing data, exactly from where you have stopped, "
+            "don't add any greetings or extra messages, follow the original prompt\n\n"
+            f"Original prompt:\n{original_prompt}\n\n"
+            f"Previous truncated response:\n{combined_text}"
+        )
+        
+        try:
+            # Prepare contents for continuation
+            contents = [{"text": continuation_prompt}]
+            
+            # Add any additional file data or other contents
+            if additional_contents:
+                file_count = sum(1 for item in additional_contents if "file_data" in item)
+                print(f"{BLUE}ℹ Including {file_count} files in continuation request {continuation_attempts}:{RESET}")
+                
+                # Display file information
+                for idx, item in enumerate(additional_contents):
+                    if "file_data" in item and hasattr(item["file_data"], "display_name"):
+                        file_name = item["file_data"].display_name
+                        file_uri = getattr(item["file_data"], "uri", "unknown_uri")
+                        print(f"{BLUE}  - File {idx+1}: {file_name} (URI: {file_uri[:30]}...){RESET}")
+                
+                contents.extend(additional_contents)
+                logger.info(f"Including {len(additional_contents)} additional content items in continuation request")
+            else:
+                print(f"{YELLOW}⚠ No additional file data included in continuation request!{RESET}")
+            
+            # Generate continuation
+            current_response = await asyncio.to_thread(
+                model.generate_content,
+                contents=contents,
+                **content_generator_kwargs
+            )
+            
+            # Check for finish reason
+            finish_reason = None
+            if hasattr(current_response, "candidates") and current_response.candidates:
+                finish_reason = current_response.candidates[0].finish_reason
+                print(f"{BLUE}ℹ Continuation {continuation_attempts} finish reason: {finish_reason}{RESET}")
+            
+            # Append to combined text
+            continuation_text = current_response.text.strip()
+            combined_text += continuation_text
+            
+            print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
+            logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)})")
+            
+            # If not truncated, we're done
+            if not is_response_truncated(current_response):
+                print(f"{GREEN}✓ Response continuation complete (not truncated){RESET}")
+                logger.info("Response continuation complete (not truncated)")
+                break
+            else:
+                print(f"{YELLOW}! Continuation {continuation_attempts} was still truncated, continuing...{RESET}")
+                
+        except Exception as e:
+            print(f"{YELLOW}✗ Error during continuation attempt {continuation_attempts}: {str(e)}{RESET}")
+            logger.error(f"Error during continuation attempt {continuation_attempts}: {str(e)}")
+            break
+    
+    return combined_text
 
 class ContentAnalyzer:
     def __init__(self):
@@ -81,186 +221,27 @@ class ContentAnalyzer:
             self.video_analysis_model = await self.model_manager.get_video_analysis_model()
         return self.video_analysis_model
 
-    @trace_llm_call("analyze_transcript_segment")
-    async def _analyze_transcript_segment(self, transcript_text: str, parent_trace=None) -> List[Dict[str, Any]]:
-        """Analyze the full transcript and break it into meaningful segments"""
-        logger.info("Starting transcript segment analysis")
+    async def _split_pdf_and_upload(self, pdf_path: str) -> List[Any]:
+        """Split a PDF into smaller chunks for processing and upload each chunk."""
         try:
-            # Wait for rate limit before proceeding
-            model_name = self.settings.model.transcription.name
-            logger.debug(f"Using model: {model_name}")
-            await self.model_manager._wait_for_rate_limit(model_name)
-            
-            # Get the model for analysis
-            model = await self.model_manager._initialize_model(model_name)
-            logger.debug("Model initialized successfully")
-            
-            if not transcript_text or len(transcript_text.strip()) < 10:
-                logger.warning("Empty or very short transcript, skipping analysis")
-                return []
-            
-            logger.info(f"Analyzing transcript of length: {len(transcript_text)}")
-            prompt = f"""You are a financial content analyzer. Analyze this complete video transcript and break it down into meaningful segments.
-            The transcript includes timestamps in [HH:MM:SS] format. Use these to determine segment boundaries.
-
-            Instructions:
-            1. Read and understand the entire transcript to get the full context
-            2. Break it down into logical segments based on topic changes and content
-            3. For each segment provide:
-               - Topic category (e.g., 'market analysis', 'stock analysis', 'general discussion')
-               - All stocks mentioned (use ticker symbols)
-               - Precise timestamps from the transcript
-               - Detailed summary of what was discussed
-               - Key points and insights
-               - Overall conclusion for the segment
-
-            Transcript:
-            {transcript_text}
-
-            Format your response as a JSON array of segments. Each segment must have:
-            - topic: "<category>"
-            - stocks: [list of stock tickers]
-            - start_time: "MM:SS" (from transcript timestamps)
-            - end_time: "MM:SS" (from transcript timestamps)
-            - summary: "detailed description of what was discussed"
-            - key_points: ["point 1", "point 2", ...]
-            - overall_summary: "conclusion about this segment"
-
-            Example segment:
-            {{
-                "topic": "<market analysis>",
-                "stocks": ["SPY", "QQQ"],
-                "start_time": "0:07",
-                "end_time": "0:47",
-                "summary": "The S&P 500 closed down, showing limited price movement...",
-                "key_points": [
-                    "Key support at 4594",
-                    "Potential double top bearish pattern forming",
-                    "Break below support could lead to 4588"
-                ],
-                "overall_summary": "S&P 500 showing signs of weakness with potential bearish pattern"
-            }}
-
-            Important:
-            - Use the actual timestamps from the transcript
-            - Include all relevant stocks mentioned
-            - Make segments based on natural topic transitions
-            - Ensure all fields are present in each segment
-            - Use proper JSON formatting as shown in the example
-            
-            """
-            
-            if self.langtrace is not None:
-                @trace_llm_call("analyze_transcript")
-                def analyze():
-                    return model.generate_content(prompt)
-                response = analyze()
-            else:
-                response = model.generate_content(prompt)
-            
-            if self.langtrace is not None:
-                with self.langtrace.start_span("analyze_transcript_response") as span:
-                    span.set_attribute("response_length", len(response.text))
-                    span.set_attribute("response_preview", response.text[:200])
-            
-            if not response or not response.text:
-                logger.error(f"Empty response from model")
-                return []
-            
-            # Parse and validate the response
-            try:
-                # Try to parse the response as JSON
-                response_text = response.text.strip()
-                # Find the first [ and last ] to extract the JSON array
-                start = response_text.find('[')
-                end = response_text.rfind(']') + 1
-                if start == -1 or end == 0:
-                    raise ValueError("No JSON array found in response")
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with open(pdf_path, 'rb') as pdf_file:
+                    pdf_reader = PyPDF2.PdfReader(pdf_file)
+                    total_pages = len(pdf_reader.pages)
                     
-                json_text = response_text[start:end]
-                segments = json.loads(json_text)
-                
-                if not isinstance(segments, list):
-                    raise ValueError("Response is not a list of segments")
+                    # Define chunk size and number of chunks
+                    chunk_size = 40  # Pages per chunk
+                    num_chunks = (total_pages + chunk_size - 1) // chunk_size
                     
-                # Validate each segment has required fields
-                for segment in segments:
-                    required_fields = ['topic', 'stocks', 'start_time', 'end_time', 'summary', 'key_points', 'overall_summary']
-                    missing_fields = [field for field in required_fields if field not in segment]
-                    if missing_fields:
-                        raise ValueError(f"Segment missing required fields: {missing_fields}")
-                
-                logger.info(f"Successfully parsed {len(segments)} segments")
-                return segments
-                
-            except Exception as e:
-                logger.error(f"Failed to parse model response: {str(e)}")
-                return []
-                
-        except Exception as e:
-            logger.error(f"Error analyzing transcript: {str(e)}")
-            return []
-
-    async def _upload_frame(self, frame_path: str) -> Optional[Any]:
-        """Upload a single frame to Gemini using file API"""
-        try:
-            file = genai.upload_file(frame_path, mime_type="image/jpeg")
-            logger.info(f"Uploaded frame '{file.display_name}' as: {file.uri}")
-            return file
-        except Exception as e:
-            logger.error(f"Failed to upload frame {frame_path}: {str(e)}")
-            return None
-
-    async def analyze_frames_batch(self, frames: List[str], retry_count: int = 0) -> Dict[str, Any]:
-        """Upload and analyze a batch of frames with rate limit handling"""
-        try:
-            # Upload frames
-            uploaded_frames = []
-            for frame in frames:
-                try:
-                    uploaded_frame = await self._upload_frame(frame)
-                    uploaded_frames.append(uploaded_frame)
-                except Exception as e:
-                    logger.error(f"Failed to upload frame {frame}: {str(e)}")
-                    if retry_count < 3:
-                        logger.info(f"Retrying frame upload, attempt {retry_count + 1}")
-                        return await self.analyze_frames_batch(frames, retry_count + 1)
-                    else:
-                        logger.error("Max retries reached for frame upload")
-                        return {"error": str(e)}
-            
-            return {"frames": uploaded_frames}
-            
-        except Exception as e:
-            logger.error(f"Failed to analyze frames batch: {str(e)}", exc_info=True)
-            return {"error": str(e)}
-
-    async def _split_pdf_and_upload(self, pdf_path: str) -> List[str]:
-        """Split a PDF into chunks and upload each chunk."""
-        try:
-            # Read the PDF
-            with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                num_pages = len(pdf_reader.pages)
-                logger.info(f"PDF has {num_pages} pages")
-                
-                # Calculate chunk size (max 10 pages per chunk)
-                chunk_size = 10
-                num_chunks = math.ceil(num_pages / chunk_size)
-                
-                # Create temporary directory for chunks
-                with tempfile.TemporaryDirectory() as temp_dir:
+                    logger.info(f"Splitting PDF with {total_pages} pages into {num_chunks} chunks")
+                    
+                    # Split into chunks
                     chunk_files = []
-                    
-                    # Split PDF into chunks
                     for i in range(num_chunks):
-                        start_page = i * chunk_size
-                        end_page = min((i + 1) * chunk_size, num_pages)
-                        
-                        # Create PDF writer for this chunk
                         pdf_writer = PyPDF2.PdfWriter()
+                        start_page = i * chunk_size
+                        end_page = min((i + 1) * chunk_size, total_pages)
                         
-                        # Add pages to chunk
                         for page_num in range(start_page, end_page):
                             pdf_writer.add_page(pdf_reader.pages[page_num])
                         
@@ -278,14 +259,18 @@ class ContentAnalyzer:
                         try:
                             file = genai.upload_file(chunk_path, mime_type="application/pdf")
                             uploaded_files.append(file)
+                            print(f"{GREEN}✓ File '{file.display_name}' ({os.path.basename(chunk_path)}) is now ACTIVE and ready to use. URI: {file.uri[:30]}...{RESET}")
                             logger.info(f"Uploaded chunk {chunk_path}")
                         except Exception as e:
+                            print(f"{YELLOW}✗ Failed to upload chunk {os.path.basename(chunk_path)}: {str(e)}{RESET}")
                             logger.error(f"Failed to upload chunk {chunk_path}: {str(e)}")
                             continue
                     
+                    print(f"{GREEN}Total files uploaded: {len(uploaded_files)}/{len(chunk_files)}{RESET}")
                     return uploaded_files
                     
         except Exception as e:
+            print(f"{YELLOW}✗ Failed to split and upload PDF: {str(e)}{RESET}")
             logger.error(f"Failed to split and upload PDF: {str(e)}")
             return []
 
@@ -303,7 +288,17 @@ class ContentAnalyzer:
             try:
                 # Split and upload PDF files
                 pdf_files = await self._split_pdf_and_upload(frames_pdf_path)
+                print(f"{GREEN}Successfully uploaded {len(pdf_files)} PDF chunks for frame analysis{RESET}")
                 logger.info(f"Successfully uploaded {len(pdf_files)} PDF chunks")
+                
+                # List all uploaded files with details
+                print(f"{BLUE}=== PDF Files Available for Analysis ==={RESET}")
+                for idx, pdf_file in enumerate(pdf_files):
+                    file_name = getattr(pdf_file, "display_name", f"file_{idx}")
+                    file_uri = getattr(pdf_file, "uri", "unknown_uri")
+                    file_state = getattr(pdf_file, "state", "unknown_state")
+                    print(f"{BLUE}  {idx+1}. {file_name} - State: {file_state} - URI: {file_uri[:30]}...{RESET}")
+                print(f"{BLUE}======================================={RESET}")
                 
                 # Create parts with all PDF files
                 prompt = f"""
@@ -334,13 +329,14 @@ class ContentAnalyzer:
                    - Record the full path of the frame from the PDF metadata
                    - Assign a quality score (0-10) based on clarity and information
                    - Pick only one best frame for each section based on the sections above
+                   - Do not add irrelevant images that doesn't show a stock chart
             
                 2. For each section in the summary:
                    - If the section discusses specific stocks:
                      * Find frames showing those exact stocks
                      * For each stock, select the highest quality frame
                      * Add the FULL FRAME PATHS to the section's frame_paths list
-                   - If no specific stocks discussed, leave frame_paths as empty list
+                   - If no specific stocks discussed or there is no visible chart, leave frame_paths as empty list
             
                 3. CRITICAL: You MUST:
                    - Use DOUBLE QUOTES for all strings and property names
@@ -389,26 +385,50 @@ class ContentAnalyzer:
                 await self.model_manager._wait_for_rate_limit(model_name)
                 
                 try:
+                    print(f"{BLUE}Starting frame analysis with {len(pdf_files)} PDF chunks...{RESET}")
                     logger.info("Starting frame analysis with all PDF chunks...")
                     # Generate content with all parts
+                    generation_config = {
+                        'temperature': 0.1,
+                        'top_p': 0.1,
+                        'top_k': 40
+                    }
+                    
+                    # Prepare PDF file contents
+                    pdf_contents = [{"file_data": pdf_file} for pdf_file in pdf_files]
+                    
+                    # Log detail about the content being sent
+                    print(f"{BLUE}Sending initial request with prompt ({len(prompt)} chars) and {len(pdf_contents)} PDF files{RESET}")
+                    
                     response = await asyncio.to_thread(
                         model.generate_content,
-                        contents=[{"text": prompt}] + [{"file_data": pdf_file} for pdf_file in pdf_files],
-                        generation_config={
-                            'temperature': 0.1,
-                            'top_p': 0.1,
-                            'top_k': 40
-                        }
+                        contents=[{"text": prompt}] + pdf_contents,
+                        generation_config=generation_config
                     )
-                    logger.info("Frame analysis completed successfully")
                     
-                    # Log raw response for debugging
-                    response_text = response.text.strip()
+                    # Check initial response finish reason
+                    finish_reason = None
+                    if hasattr(response, "candidates") and response.candidates:
+                        finish_reason = response.candidates[0].finish_reason
+                        print(f"{BLUE}Initial response finish reason: {finish_reason}{RESET}")
+                    
+                    print(f"{GREEN}Initial frame analysis completed. Response length: {len(response.text)} chars{RESET}")
+                    logger.info("Initial frame analysis completed")
+                    
+                    # Handle potential chunked response - provide PDF files for continuations too
+                    response_text = await handle_chunked_response(
+                        model=model,
+                        original_prompt=prompt,
+                        first_response=response,
+                        content_generator_kwargs={'generation_config': generation_config},
+                        additional_contents=pdf_contents
+                    )
                     
                     # Save raw response
                     raw_response_path = self.summaries_dir / f"{video.id}_raw_frames_analysis.txt"
                     with open(raw_response_path, 'w', encoding='utf-8') as f:
                         f.write(response_text)
+                    print(f"{GREEN}Saved raw frames analysis ({len(response_text)} chars) to {raw_response_path}{RESET}")
                     logger.info(f"Saved raw frames analysis to {raw_response_path}")
                     
                     try:
@@ -451,28 +471,6 @@ class ContentAnalyzer:
             logger.error(f"Failed to analyze frames and update summary: {str(e)}", exc_info=True)
             return summary
 
-    def _clean_json_response(self, response_text: str) -> str:
-        """Clean and prepare JSON response for parsing."""
-        try:
-            # Find content between ```json and ``` markers
-            start_marker = "```json"
-            end_marker = "```"
-            
-            start_idx = response_text.find(start_marker)
-            if start_idx != -1:
-                # Move past the start marker
-                start_idx += len(start_marker)
-                end_idx = response_text.find(end_marker, start_idx)
-                if end_idx != -1:
-                    return response_text[start_idx:end_idx].strip()
-            
-            return response_text.strip()
-            
-        except Exception as e:
-            logger.error(f"Error cleaning JSON response: {str(e)}")
-            logger.debug(f"Problematic response text: {response_text[:200]}...")
-            return response_text
-
     async def _process_transcript(self, video: Video, raw_transcript: str) -> Dict[str, Any]:
         """Process the transcript and generate a summary."""
         try:
@@ -498,39 +496,57 @@ class ContentAnalyzer:
             Return: list[Section]
             
             Instructions:
-            1. Break down the content into sections based on the topics listed above
+            1. Break down the transcript into sections based on the topics listed above
             2. For each section provide all fields defined in the schema
             3. When analyzing stock-specific sections:
-               - Include specific stock tickers/names
-               - Note any market data or metrics mentioned
-               - Highlight significant trends or patterns
+               - CRITICAL: Create a SEPARATE section for EACH individual stock ticker/name
+               - Each "stock analysis" section MUST have EXACTLY ONE stock in the 'stocks' array
+               - For example, if AAPL, MSFT, and AMZN are discussed sequentially, create THREE separate sections
+               - Include specific times when each individual stock is discussed
+               - Note any market data or metrics mentioned for that specific stock
+               - Highlight significant trends or patterns for that specific stock
             4. Important:
                - Skip any non-relevant discussions, commercials, or advertising
                - Focus on actionable trading insights and market analysis
                - Be specific and detailed in your summaries
                - Use proper stock ticker symbols
+               - DO NOT combine multiple stocks in a single section
             
-            IMPORTANT: Your response must be a valid JSON object matching the schema above.
-            Do not include any text before or after the JSON.
+            IMPORTANT: 
+            - Your response must be a valid JSON array matching the schema above.
+            - Do not include any text before or after the JSON.
+            - Make sure that you complete the JSON array with proper closing brackets.
+            - Start your response with [
+            - End your response with ]
             
             Here is the transcript to analyze:
             {raw_transcript}
             """
 
+            # Generation configuration
+            generation_config = {
+                'temperature': 0.1,
+                'top_p': 0.1,
+                'top_k': 40
+            }
+
             # Generate content
             response = await asyncio.to_thread(
                 model.generate_content,
                 contents=[{"text": prompt}],
-                generation_config={
-                    'temperature': 0.1,
-                    'top_p': 0.1,
-                    'top_k': 40
-                }
+                generation_config=generation_config
             )
             
-            # Log raw response for debugging
-            response_text = response.text.strip()
-            logger.info(f"Raw response from model: {response_text[:500]}...")
+            # Handle potential chunked response
+            response_text = await handle_chunked_response(
+                model=model,
+                original_prompt=prompt,
+                first_response=response,
+                content_generator_kwargs={'generation_config': generation_config}
+            )
+            
+            # Log partial response for debugging
+            logger.info(f"Response first 500 chars: {response_text[:500]}...")
             
             # Save raw response
             raw_response_path = self.summaries_dir / f"{video.id}_raw_response.txt"
@@ -630,10 +646,19 @@ class ContentAnalyzer:
     async def _save_combined_analysis(self, video: Video, analysis: Dict[str, Any]) -> str:
         """Save all analysis data in a single JSON file."""
         try:
+            # Check if sections is stored as a string and convert it to proper JSON object
+            if 'sections' in analysis and isinstance(analysis['sections'], str):
+                try:
+                    # Try to parse the sections string as JSON
+                    logger.info("Converting 'sections' from string to JSON object before saving")
+                    analysis['sections'] = json.loads(analysis['sections'])
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse 'sections' as JSON during initial save: {str(e)}")
+            
             # Save the analysis JSON
             output_path = self.summaries_dir / f"{video.id}_analysis.json"
             with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(analysis, f, indent=2)
+                json.dump(analysis, f, indent=2, ensure_ascii=False)
             
             logger.info(f"Saved analysis to {output_path}")
             return str(output_path)
@@ -642,18 +667,61 @@ class ContentAnalyzer:
             logger.error(f"Failed to save analysis: {str(e)}")
             raise
 
-    def _create_default_analysis(self, block: Dict) -> Dict[str, Any]:
-        """Create a default analysis when the model fails to generate a valid one"""
-        return {
-            "topic": block.get("topic", "general discussion"),
-            "stocks": block.get("stocks", ["unknown"]),
-            "summary": "Default analysis of market conditions",
-            "key_points": [
-                "Market conditions",
-                "Trading considerations",
-                "Technical patterns",
-                "Price levels"
-            ],
-            "overall_summary": "Analysis of market conditions and trading opportunities",
-            "frames": []
-        }
+
+    def _clean_json_response(self, response_text: str) -> str:
+        """Clean and prepare JSON response for parsing."""
+        try:
+            # First, remove any ```json and ``` markers
+            # Find content between ```json and ``` markers
+            start_marker = "```json"
+            end_marker = "```"
+            
+            # Try to extract content between markdown code blocks first
+            start_idx = response_text.find(start_marker)
+            if start_idx != -1:
+                # Move past the start marker
+                start_idx += len(start_marker)
+                end_idx = response_text.find(end_marker, start_idx)
+                if end_idx != -1:
+                    response_text = response_text[start_idx:end_idx].strip()
+            
+            # If we still have markdown code blocks, do more aggressive cleanup
+            if "```" in response_text:
+                # Strip all lines with code block markers
+                lines = response_text.split("\n")
+                lines = [line for line in lines if not line.strip().startswith("```") and not line.strip().endswith("```")]
+                response_text = "\n".join(lines).strip()
+            
+            # Clean any remaining code block markers that might be inline
+            response_text = response_text.replace("```json", "").replace("```", "").strip()
+            
+            # Replace invalid control characters
+            # This regex matches all ASCII control characters except common whitespace (\t, \n, \r)
+            import re
+            response_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', response_text)
+            
+            # Make sure we have valid JSON 
+            # Try to parse it to find errors, but don't actually use the parsed result yet
+            try:
+                json.loads(response_text)
+            except json.JSONDecodeError as e:
+                # Log the error location for debugging
+                logger.warning(f"JSON validation failed at char {e.pos}: {e.msg}")
+                # Attempt to fix common issues with the JSON
+                if "control character" in str(e):
+                    # Convert the string to bytes, decode with errors='ignore' to remove invalid chars
+                    response_text = response_text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+                
+                # Try once more to validate
+                try:
+                    json.loads(response_text)
+                    logger.info("JSON was fixed successfully after cleaning")
+                except json.JSONDecodeError:
+                    logger.warning("JSON still invalid after cleaning")
+            
+            return response_text.strip()
+            
+        except Exception as e:
+            logger.error(f"Error cleaning JSON response: {str(e)}")
+            logger.debug(f"Problematic response text: {response_text[:200]}...")
+            return response_text

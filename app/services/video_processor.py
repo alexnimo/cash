@@ -18,6 +18,7 @@ from app.services.model_manager import ModelManager
 from app.services.model_config import configure_models
 from app.services.content_analyzer import ContentAnalyzer
 from app.services.errors import VideoProcessingError
+import re
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -275,14 +276,6 @@ class VideoProcessor:
             self.video_status[video.id]["progress"]["analyzing"] = 100
             logger.info("Content analysis completed")
 
-            # Generate frames report after all processing is complete
-            try:
-                logger.info(f"Generating frames report for video {video.id}")
-                report_path = self.content_analyzer.report_generator.generate_frames_report(video)
-                logger.info(f"Successfully generated frames report at {report_path}")
-            except Exception as e:
-                logger.error(f"Failed to generate frames report: {str(e)}", exc_info=True)
-
             # Update status
             self.video_status[video.id]["status"] = "completed"
             logger.info(f"Video {video.id} processed successfully")
@@ -388,7 +381,7 @@ class VideoProcessor:
                 'no_warnings': True,
                 'ignoreerrors': False,
                 'nocheckcertificate': True,
-                'source_address': '0.0.0.0',  # Force IPv4  # Use cookies file
+                'source_address': '0.0.0.0',  # Force ipv4  # Use cookies file
             }
             
             # Download video
@@ -473,6 +466,7 @@ class VideoProcessor:
                 }]
             }
             
+            # Download audio
             with yt_dlp.YoutubeDL(audio_opts) as ydl:
                 info = ydl.extract_info(video_url, download=True)
                 if info is None:
@@ -823,9 +817,59 @@ class VideoProcessor:
                     
                     # Save the final analysis
                     final_output_path = self.content_analyzer.summaries_dir / f"{video.id}_final_analysis.json"
-                    with open(final_output_path, 'w', encoding='utf-8') as f:
-                        json.dump(updated_analysis, f, indent=2)
-                    logger.info(f"Saved final analysis to {final_output_path}")
+                    logger.info(f"Saving final analysis to {final_output_path}")
+                    
+                    # Clean the updated_analysis before saving
+                    # This ensures all keys and string values are properly formatted for JSON
+                    def clean_for_json(obj):
+                        if isinstance(obj, dict):
+                            # Create a new dict with properly handled values
+                            cleaned_dict = {}
+                            for k, v in obj.items():
+                                # Handle the 'sections' field specifically if it's a string containing JSON
+                                if k == 'sections' and isinstance(v, str):
+                                    try:
+                                        # Try to parse the sections string as JSON
+                                        logger.info("Parsing 'sections' field from string to JSON object")
+                                        cleaned_dict[str(k)] = json.loads(v)
+                                    except json.JSONDecodeError as e:
+                                        logger.error(f"Failed to parse 'sections' as JSON: {str(e)}")
+                                        # Keep as string if parsing fails
+                                        cleaned_dict[str(k)] = v
+                                else:
+                                    cleaned_dict[str(k)] = clean_for_json(v)
+                            return cleaned_dict
+                        elif isinstance(obj, list):
+                            return [clean_for_json(i) for i in obj]
+                        elif isinstance(obj, (str, int, float, bool)) or obj is None:
+                            return obj
+                        else:
+                            # Convert any other types to strings
+                            return str(obj)
+                    
+                    # Clean the analysis object before saving
+                    cleaned_analysis = clean_for_json(updated_analysis)
+                    
+                    try:
+                        with open(final_output_path, 'w', encoding='utf-8') as f:
+                            json.dump(cleaned_analysis, f, indent=2, ensure_ascii=False)
+                        logger.info(f"Saved final analysis to {final_output_path}")
+                    except Exception as e:
+                        logger.error(f"Error saving final analysis JSON: {str(e)}")
+                        # Fallback: try to save with more aggressive sanitization
+                        try:
+                            # Convert to string, clean, and parse back to ensure valid JSON
+                            analysis_str = json.dumps(cleaned_analysis)
+                            # Remove any potential problematic characters
+                            analysis_str = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', analysis_str)
+                            # Try to parse back to verify
+                            reparsed = json.loads(analysis_str)
+                            # Save the sanitized version
+                            with open(final_output_path, 'w', encoding='utf-8') as f:
+                                json.dump(reparsed, f, indent=2, ensure_ascii=False)
+                            logger.info(f"Saved sanitized final analysis to {final_output_path}")
+                        except Exception as fallback_error:
+                            logger.error(f"Failed even with sanitization: {str(fallback_error)}")
                 
             except Exception as e:
                 logger.error(f"Failed to analyze frames: {str(e)}", exc_info=True)
