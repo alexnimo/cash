@@ -43,10 +43,14 @@ def is_response_truncated(response: GenerateContentResponse) -> bool:
     try:
         # Check if response was truncated due to MAX_TOKENS
         finish_reason = response.candidates[0].finish_reason
-        is_truncated = finish_reason == 'FINISH_REASON_MAX_TOKENS' or finish_reason == 2
+        
+        # Check if the finish_reason.name is "MAX_TOKENS"
+        is_truncated = hasattr(finish_reason, 'name') and finish_reason.name == "MAX_TOKENS"
         
         if is_truncated:
             logger.info("Response was truncated due to token limit (FINISH_REASON_MAX_TOKENS)")
+        else:
+            logger.info(f"Response finish reason: {finish_reason} (not truncated)")
         
         return is_truncated
     except (AttributeError, IndexError) as e:
@@ -92,6 +96,7 @@ async def handle_chunked_response(
     # Initialize for continuation
     current_response = first_response
     continuation_attempts = 0
+    previous_length = len(combined_text)
     
     # Continue generating content until the response is complete or max attempts reached
     while is_response_truncated(current_response) and continuation_attempts < max_continuation_attempts:
@@ -146,8 +151,20 @@ async def handle_chunked_response(
             continuation_text = current_response.text.strip()
             combined_text += continuation_text
             
-            print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
-            logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)})")
+            # Check if the response is actually growing
+            current_length = len(combined_text)
+            growth = current_length - previous_length
+            
+            print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars, growth: {growth} chars){RESET}")
+            logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)}, growth: {growth})")
+            
+            # If the response didn't grow significantly, assume it's complete regardless of finish_reason
+            if growth < 100:  # Minimal growth threshold
+                print(f"{YELLOW}! Continuation added minimal content ({growth} chars). Assuming response is complete.{RESET}")
+                logger.info(f"Continuation added minimal content ({growth} chars). Assuming response is complete.")
+                break
+            
+            previous_length = current_length
             
             # If not truncated, we're done
             if not is_response_truncated(current_response):
