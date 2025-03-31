@@ -10,6 +10,7 @@ from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 from app.utils.langtrace_utils import get_langtrace, init_langtrace
+from app.utils.path_utils import get_storage_subdir, get_storage_path
 import google.generativeai as genai
 from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata, VideoAnalysis
 from app.models.transcript import TranscriptSegment
@@ -33,41 +34,22 @@ else:
 # Configure models
 configure_models()
 
-# Get the absolute path to the project root directory
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.absolute()
-
 class VideoProcessor:
     def __init__(self, video_status: Dict[str, Dict]):
         try:
-            # Convert relative paths to absolute paths using Path for OS agnostic handling
-            base_dir = Path(settings.video_storage.base_dir)
-            if not base_dir.is_absolute():
-                base_dir = PROJECT_ROOT / base_dir
-            self.video_dir = base_dir.resolve()
-            self.video_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create audio directory for transcription
-            self.audio_dir = (self.video_dir / "audio").resolve()
-            self.audio_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create transcripts directory
-            self.transcript_dir = (self.video_dir / "transcripts").resolve()
-            self.transcript_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create raw transcripts directory for text files
-            self.raw_transcript_dir = (self.video_dir / "raw_transcripts").resolve()
-            self.raw_transcript_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create frames directory
-            self.frames_dir = (self.video_dir / "frames").resolve()
-            self.frames_dir.mkdir(parents=True, exist_ok=True)
+            # Use the unified storage path utilities
+            self.video_dir = get_storage_subdir("videos")
+            self.audio_dir = get_storage_subdir("videos/audio")
+            self.transcript_dir = get_storage_subdir("videos/transcripts")
+            self.raw_transcript_dir = get_storage_subdir("videos/raw_transcripts")
+            self.frames_dir = get_storage_subdir("videos/frames")
             
             # Create trace directory if langtrace is enabled
             if settings.langtrace.enabled:
                 trace_dir = Path(settings.langtrace.trace_dir)
                 if not trace_dir.is_absolute():
-                    trace_dir = (PROJECT_ROOT / trace_dir).resolve()
-                trace_dir.mkdir(parents=True, exist_ok=True)
+                    trace_dir = get_storage_path(settings.langtrace.trace_dir)
+                    trace_dir.mkdir(parents=True, exist_ok=True)
             
             # Initialize services
             self.model_manager = ModelManager(settings)
@@ -148,13 +130,13 @@ class VideoProcessor:
                 
                 # Save raw transcript text
                 raw_text = ' '.join(segment['text'] for segment in transcript_data)
-                raw_transcript_path = self.raw_transcript_dir / f"{video.id}.txt"
+                raw_transcript_path = get_storage_path(f"videos/raw_transcripts/{video.id}.txt")
                 with open(raw_transcript_path, 'w', encoding='utf-8') as f:
                     f.write(raw_text)
                 logger.info(f"Saved raw transcript to {raw_transcript_path}")
                 
                 # Save structured transcript to file
-                transcript_path = self.transcript_dir / f"{video.id}.json"
+                transcript_path = get_storage_path(f"videos/transcripts/{video.id}.json")
                 logger.info(f"Saving transcript to {transcript_path}")
                 with open(transcript_path, 'w', encoding='utf-8') as f:
                     json.dump({
@@ -436,7 +418,7 @@ class VideoProcessor:
         """Download audio from video URL"""
         try:
             video_id = Path(video_path).stem
-            audio_path = str(self.audio_dir / f'{video_id}.wav')
+            audio_path = get_storage_path(f"videos/audio/{video_id}.wav")
             
             # Get video URL from the video status
             video_url = None
@@ -522,7 +504,7 @@ class VideoProcessor:
             
             # Check if transcript exists first
             video_id = Path(audio_path).stem
-            transcript_path = self.transcript_dir / f"{video_id}.json"
+            transcript_path = get_storage_path(f"videos/transcripts/{video_id}.json")
             if transcript_path.exists():
                 logger.info(f"Found existing transcript at {transcript_path}")
                 with open(transcript_path, 'r', encoding='utf-8') as f:
@@ -608,7 +590,7 @@ class VideoProcessor:
     async def _load_raw_transcript(self, video_id: str) -> Optional[str]:
         """Load transcript text from structured transcript file with timestamps"""
         try:
-            transcript_path = self.transcript_dir / f"{video_id}.json"
+            transcript_path = get_storage_path(f"videos/transcripts/{video_id}.json")
             if not transcript_path.exists():
                 logger.warning(f"Transcript file not found: {transcript_path}")
                 return None
@@ -630,7 +612,7 @@ class VideoProcessor:
     def _save_raw_transcript(self, video_id: str, text: str):
         """Save raw transcript text to file"""
         try:
-            file_path = self.raw_transcript_dir / f"{video_id}.txt"
+            file_path = get_storage_path(f"videos/raw_transcripts/{video_id}.txt")
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(text)
             logger.info(f"Saved raw transcript to {file_path}")
@@ -642,7 +624,7 @@ class VideoProcessor:
         """Save transcript to local file"""
         try:
             # Save segmented transcript as JSON
-            transcript_path = self.transcript_dir / f"{video_id}.json"
+            transcript_path = get_storage_path(f"videos/transcripts/{video_id}.json")
             with open(transcript_path, 'w', encoding='utf-8') as f:
                 # Convert TranscriptSegment objects to dict, excluding any None values
                 segments = []
@@ -662,7 +644,7 @@ class VideoProcessor:
             logger.info(f"Extracting frames from video {video.id}")
             
             # Create video-specific frames directory
-            frames_dir = self.frames_dir / video.id
+            frames_dir = get_storage_subdir(f"videos/frames/{video.id}")
             frames_dir.mkdir(parents=True, exist_ok=True)
             
             # Open video file
@@ -732,11 +714,12 @@ class VideoProcessor:
     async def _save_analysis_json(self, video: Video):
         """Save analysis results to JSON file."""
         try:
-            analysis_path = self.analysis_dir / f"{video.id}.json"
+            analysis_path = get_storage_path(f"videos/analysis/{video.id}.json")
             logger.info(f"Saving analysis to {analysis_path}")
             
             # Create analysis directory if it doesn't exist
-            self.analysis_dir.mkdir(parents=True, exist_ok=True)
+            analysis_dir = get_storage_subdir(f"videos/analysis")
+            analysis_dir.mkdir(parents=True, exist_ok=True)
             
             # Convert analysis to dict and save
             if video.analysis:

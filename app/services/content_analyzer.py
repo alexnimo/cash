@@ -11,6 +11,7 @@ from app.models.video import Video, VideoStatus
 from app.services.model_manager import ModelManager
 from app.services.report_generator import ReportGenerator
 from app.utils.langtrace_utils import get_langtrace, trace_llm_call, init_langtrace
+from app.utils.path_utils import get_storage_subdir, get_storage_path
 from PIL import Image
 import os
 import base64
@@ -96,7 +97,6 @@ async def handle_chunked_response(
     # Initialize for continuation
     current_response = first_response
     continuation_attempts = 0
-    previous_length = len(combined_text)
     
     # Continue generating content until the response is complete or max attempts reached
     while is_response_truncated(current_response) and continuation_attempts < max_continuation_attempts:
@@ -151,20 +151,8 @@ async def handle_chunked_response(
             continuation_text = current_response.text.strip()
             combined_text += continuation_text
             
-            # Check if the response is actually growing
-            current_length = len(combined_text)
-            growth = current_length - previous_length
-            
-            print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars, growth: {growth} chars){RESET}")
-            logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)}, growth: {growth})")
-            
-            # If the response didn't grow significantly, assume it's complete regardless of finish_reason
-            if growth < 100:  # Minimal growth threshold
-                print(f"{YELLOW}! Continuation added minimal content ({growth} chars). Assuming response is complete.{RESET}")
-                logger.info(f"Continuation added minimal content ({growth} chars). Assuming response is complete.")
-                break
-            
-            previous_length = current_length
+            print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
+            logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)})")
             
             # If not truncated, we're done
             if not is_response_truncated(current_response):
@@ -190,30 +178,12 @@ class ContentAnalyzer:
         # Initialize model as None (it will be lazily loaded)
         self.video_analysis_model = None
         
-        # Get the absolute path to the project root directory
-        self.project_root = Path(__file__).resolve().parent.parent.parent.absolute()
-        
-        # Convert relative paths to absolute paths
-        base_dir = Path(self.settings.video_storage.base_dir)
-        if not base_dir.is_absolute():
-            base_dir = self.project_root / base_dir
-        self.video_dir = base_dir.resolve()
-        
-        # Initialize directories using the same paths as VideoProcessor
-        self.transcript_dir = (self.video_dir / "transcripts").resolve()
-        self.transcript_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create raw transcript directory
-        self.raw_transcript_dir = (self.video_dir / "raw_transcripts").resolve()
-        self.raw_transcript_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create summaries directory if it doesn't exist
-        self.summaries_dir = (self.video_dir / "summaries").resolve()
-        self.summaries_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create reports directory if it doesn't exist
-        self.reports_dir = (self.video_dir / "reports").resolve()
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        # Use the unified storage path utilities
+        self.video_dir = get_storage_subdir("videos")
+        self.transcript_dir = get_storage_subdir("videos/transcripts")
+        self.raw_transcript_dir = get_storage_subdir("videos/raw_transcripts")
+        self.summaries_dir = get_storage_subdir("videos/summaries")
+        self.reports_dir = get_storage_subdir("videos/reports")
         
         # Initialize report generator
         self.report_generator = ReportGenerator(str(self.reports_dir))

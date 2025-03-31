@@ -33,12 +33,7 @@ vector_store:
 
 # Storage settings
 storage:
-  transcript_dir: "./data/transcripts"
-  frames_dir: "./data/frames"
-  summaries_dir: "./data/summaries"
-  temp_dir: "./data/temp"
-  cache_dir: "cache"
-  max_cache_size: 5368709120
+  base_path: "/mnt/d/cash"  # Base storage location for all application data
 
 # API settings
 api:

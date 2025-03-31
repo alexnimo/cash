@@ -71,10 +71,8 @@ class VectorStoreConfig(BaseModel):
     )
 
 class StorageConfig(BaseModel):
-    transcript_dir: str
-    frames_dir: str
-    summaries_dir: str
-    temp_dir: str
+    base_path: str = Field(default="./data")  # Base storage location for all application data
+    # This is the only required setting; subdirectories will be created automatically
 
 class APIConfig(BaseModel):
     gemini_api_key: str
