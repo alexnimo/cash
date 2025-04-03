@@ -106,11 +106,15 @@ async def handle_chunked_response(
         
         # Build continuation prompt
         continuation_prompt = (
-            "Continue from where you have stopped in the following provided response, "
-            "add only the missing data, exactly from where you have stopped, "
-            "don't add any greetings or extra messages, follow the original prompt\n\n"
-            f"Original prompt:\n{original_prompt}\n\n"
-            f"Previous truncated response:\n{combined_text}"
+            f"""
+            Continue exactly from where you have stopped in the following provided response
+            add only the missing data, exactly from the point where you have stopped,
+            pay attention if there is a missing charectres in the provided response that must be added such
+            a missing quate " or colon - this is crucial to complete the previous chunked response in case it's missing
+            don't add any greetings or extra messages, follow the original prompt\n\n
+            Original prompt:\n{original_prompt}\n\n
+            Previous truncated response:\n{combined_text}   
+            """
         )
         
         try:
@@ -149,6 +153,12 @@ async def handle_chunked_response(
             
             # Append to combined text
             continuation_text = current_response.text.strip()
+            
+            # Clean continuation text - remove leading '[' that breaks JSON structure
+            if continuation_text.startswith('['):
+                logger.info("Removing leading '[' from continuation response to maintain JSON structure")
+                continuation_text = continuation_text[1:]
+            
             combined_text += continuation_text
             
             print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
@@ -316,6 +326,8 @@ class ContentAnalyzer:
                    - Record the full path of the frame from the PDF metadata
                    - Assign a quality score (0-10) based on clarity and information
                    - Pick only one best frame for each section based on the sections above
+                   - You can pick one additional frame for eacch stock in case you can cleary recognize
+                    Time frame. In most cases time frames can be recognized by the chart title (w , weekly, m, monthly) or the timeframe label.
                    - Do not add irrelevant images that doesn't show a stock chart
             
                 2. For each section in the summary:
@@ -324,6 +336,7 @@ class ContentAnalyzer:
                      * For each stock, select the highest quality frame
                      * Add the FULL FRAME PATHS to the section's frame_paths list
                    - If no specific stocks discussed or there is no visible chart, leave frame_paths as empty list
+                   - Do not add any general frames which do not show a stock chart
             
                 3. CRITICAL: You MUST:
                    - Use DOUBLE QUOTES for all strings and property names
@@ -371,22 +384,24 @@ class ContentAnalyzer:
                 model_name = self.settings.model.transcription.name
                 await self.model_manager._wait_for_rate_limit(model_name)
                 
+                print(f"{BLUE}Starting frame analysis with {len(pdf_files)} PDF chunks...{RESET}")
+                logger.info("Starting frame analysis with all PDF chunks...")
+                
+                # Generation configuration
+                generation_config = {
+                    'temperature': 0.1,
+                    'top_p': 0.1,
+                    'top_k': 40,
+                    'response_mime_type': 'application/json'  # Force JSON response format
+                }
+                
+                # Prepare PDF file contents
+                pdf_contents = [{"file_data": pdf_file} for pdf_file in pdf_files]
+                
+                # Log detail about the content being sent
+                print(f"{BLUE}Sending initial request with prompt ({len(prompt)} chars) and {len(pdf_contents)} PDF files{RESET}")
+                
                 try:
-                    print(f"{BLUE}Starting frame analysis with {len(pdf_files)} PDF chunks...{RESET}")
-                    logger.info("Starting frame analysis with all PDF chunks...")
-                    # Generate content with all parts
-                    generation_config = {
-                        'temperature': 0.1,
-                        'top_p': 0.1,
-                        'top_k': 40
-                    }
-                    
-                    # Prepare PDF file contents
-                    pdf_contents = [{"file_data": pdf_file} for pdf_file in pdf_files]
-                    
-                    # Log detail about the content being sent
-                    print(f"{BLUE}Sending initial request with prompt ({len(prompt)} chars) and {len(pdf_contents)} PDF files{RESET}")
-                    
                     response = await asyncio.to_thread(
                         model.generate_content,
                         contents=[{"text": prompt}] + pdf_contents,
@@ -418,38 +433,25 @@ class ContentAnalyzer:
                     print(f"{GREEN}Saved raw frames analysis ({len(response_text)} chars) to {raw_response_path}{RESET}")
                     logger.info(f"Saved raw frames analysis to {raw_response_path}")
                     
+                    # Direct JSON parsing - minimal approach
                     try:
-                        # Remove markdown code block markers
-                        if "```json" in response_text:
-                            response_text = response_text.replace("```json", "").replace("```", "").strip()
-                        elif "```" in response_text:
-                            lines = response_text.split("\n")
-                            lines = [line for line in lines if not line.startswith("```") and not line.endswith("```")]
-                            response_text = "\n".join(lines).strip()
+                        # Parse JSON directly - no sanitization or validation
+                        sections = json.loads(response_text)
                         
-                        # Parse JSON response
-                        updated_sections = json.loads(response_text)
-                        
-                        # Validate sections is a list
-                        if not isinstance(updated_sections, list):
-                            logger.error("Response is not a list of sections")
-                            summary["sections"] = response_text  # Save raw response
-                            return summary
-                        
-                        # Update the summary with frame information
-                        summary["sections"] = updated_sections
+                        # Store the parsed sections directly
+                        summary["sections"] = sections
                         return summary
                         
                     except json.JSONDecodeError as e:
                         logger.error(f"Failed to parse frame analysis JSON: {str(e)}")
-                        # Save the raw response in the summary instead of failing
-                        summary["sections"] = response_text
+                        # Store raw response without attempting complex recovery
+                        summary["sections"] = response_text  # Store raw response as fallback
                         return summary
                     
                 except Exception as e:
-                    logger.error(f"Failed to analyze frames and update summary: {str(e)}", exc_info=True)
+                    logger.error(f"Failed to generate or process frame analysis: {str(e)}")
                     return summary
-                
+            
             except Exception as e:
                 logger.error(f"Failed to analyze frames and update summary: {str(e)}")
                 return summary
@@ -514,7 +516,8 @@ class ContentAnalyzer:
             generation_config = {
                 'temperature': 0.1,
                 'top_p': 0.1,
-                'top_k': 40
+                'top_k': 40,
+                'response_mime_type': 'application/json'  # Force JSON response format
             }
 
             # Generate content
@@ -541,16 +544,10 @@ class ContentAnalyzer:
                 f.write(response_text)
             logger.info(f"Saved raw response to {raw_response_path}")
             
+            # Direct JSON parsing - minimal approach
             try:
-                # Clean and parse JSON
-                response_text = self._clean_json_response(response_text)
+                # Parse JSON directly - no sanitization or validation
                 sections = json.loads(response_text)
-                
-                # Validate sections is a list
-                if not isinstance(sections, list):
-                    logger.error("Response is not a list of sections")
-                    sections = [{"topic": "Parsing Error", "stocks": [], "start_time": 0, "end_time": 0, 
-                               "summary": response_text, "key_points": [], "overall_summary": "Failed to parse response"}]
                 
                 # Create the analysis object
                 analysis_json = {
@@ -575,8 +572,11 @@ class ContentAnalyzer:
                 
             except (json.JSONDecodeError, ValueError) as e:
                 logger.error(f"Failed to parse JSON: {str(e)}")
+                
+                # Create error section
                 sections = [{"topic": "Parsing Error", "stocks": [], "start_time": 0, "end_time": 0, 
-                           "summary": response_text, "key_points": [], "overall_summary": f"Failed to parse: {str(e)}"}]
+                          "summary": "Failed to parse response", "key_points": [], 
+                          "overall_summary": f"Failed to parse: {str(e)}"}]
                 
                 analysis_json = {
                     "Date": datetime.now().strftime("%B %d %Y"),
@@ -597,10 +597,63 @@ class ContentAnalyzer:
                     "stocks": sections,
                     "analysis_json": analysis_json
                 }
-            
+                
         except Exception as e:
             logger.error(f"Error in transcript processing: {str(e)}")
             raise VideoProcessingError("Failed to analyze transcript content")
+
+    async def _save_combined_analysis(self, video: Video, analysis: Dict[str, Any]) -> str:
+        """Save all analysis data in a single JSON file."""
+        try:
+            # Ensure analysis is properly structured for saving
+            if 'analysis_json' in analysis and isinstance(analysis['analysis_json'], dict):
+                # Use the pre-built analysis_json object directly
+                output_analysis = analysis['analysis_json']
+                logger.info("Using pre-structured analysis_json for saving")
+            else:
+                # Create a properly structured analysis object
+                logger.info("Creating structured analysis object for saving")
+                
+                # Check if sections is stored as a string and convert it to proper JSON object
+                sections = analysis.get('stocks', [])
+                if isinstance(sections, str):
+                    try:
+                        # Simply parse the string to JSON - it should already be valid JSON with response_mime_type
+                        logger.info("Converting 'sections' from string to JSON object before saving")
+                        sections = json.loads(sections)
+                        logger.info("Successfully converted 'sections' string to JSON object")
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse 'sections' as JSON during save: {str(e)}")
+                        # Save the problematic string for debugging
+                        error_path = self.summaries_dir / f"{video.id}_sections_parse_error.txt"
+                        with open(error_path, 'w', encoding='utf-8') as f:
+                            f.write(f"Error: {str(e)}\n\nOriginal sections string:\n{sections}")
+                        logger.error(f"Saved sections parse error to {error_path}")
+                
+                # Create the output analysis structure
+                output_analysis = {
+                    "Date": datetime.now().strftime("%B %d %Y"),
+                    "Channel name": video.metadata.channel_name if video.metadata else "",
+                    "Video name": video.metadata.video_title if video.metadata else "",
+                    "sections": sections
+                }
+            
+            # Save the analysis JSON 
+            output_path = self.summaries_dir / f"{video.id}_analysis.json"
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(output_analysis, f, indent=2, ensure_ascii=False)
+            
+            # Also save a final analysis file
+            final_output_path = self.summaries_dir / f"{video.id}_final_analysis.json"
+            with open(final_output_path, 'w', encoding='utf-8') as f:
+                json.dump(output_analysis, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Saved analysis to {output_path} and {final_output_path}")
+            return str(output_path)
+            
+        except Exception as e:
+            logger.error(f"Failed to save analysis: {str(e)}")
+            raise
 
     async def analyze_video_content(self, video: Video) -> Dict[str, Any]:
         """Analyze video content and generate structured summaries"""
@@ -629,86 +682,3 @@ class ContentAnalyzer:
         except Exception as e:
             logger.error(f"Failed to analyze video content: {str(e)}")
             raise
-
-    async def _save_combined_analysis(self, video: Video, analysis: Dict[str, Any]) -> str:
-        """Save all analysis data in a single JSON file."""
-        try:
-            # Check if sections is stored as a string and convert it to proper JSON object
-            if 'sections' in analysis and isinstance(analysis['sections'], str):
-                try:
-                    # Try to parse the sections string as JSON
-                    logger.info("Converting 'sections' from string to JSON object before saving")
-                    analysis['sections'] = json.loads(analysis['sections'])
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse 'sections' as JSON during initial save: {str(e)}")
-            
-            # Save the analysis JSON
-            output_path = self.summaries_dir / f"{video.id}_analysis.json"
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(analysis, f, indent=2, ensure_ascii=False)
-            
-            logger.info(f"Saved analysis to {output_path}")
-            return str(output_path)
-            
-        except Exception as e:
-            logger.error(f"Failed to save analysis: {str(e)}")
-            raise
-
-
-    def _clean_json_response(self, response_text: str) -> str:
-        """Clean and prepare JSON response for parsing."""
-        try:
-            # First, remove any ```json and ``` markers
-            # Find content between ```json and ``` markers
-            start_marker = "```json"
-            end_marker = "```"
-            
-            # Try to extract content between markdown code blocks first
-            start_idx = response_text.find(start_marker)
-            if start_idx != -1:
-                # Move past the start marker
-                start_idx += len(start_marker)
-                end_idx = response_text.find(end_marker, start_idx)
-                if end_idx != -1:
-                    response_text = response_text[start_idx:end_idx].strip()
-            
-            # If we still have markdown code blocks, do more aggressive cleanup
-            if "```" in response_text:
-                # Strip all lines with code block markers
-                lines = response_text.split("\n")
-                lines = [line for line in lines if not line.strip().startswith("```") and not line.strip().endswith("```")]
-                response_text = "\n".join(lines).strip()
-            
-            # Clean any remaining code block markers that might be inline
-            response_text = response_text.replace("```json", "").replace("```", "").strip()
-            
-            # Replace invalid control characters
-            # This regex matches all ASCII control characters except common whitespace (\t, \n, \r)
-            import re
-            response_text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', response_text)
-            
-            # Make sure we have valid JSON 
-            # Try to parse it to find errors, but don't actually use the parsed result yet
-            try:
-                json.loads(response_text)
-            except json.JSONDecodeError as e:
-                # Log the error location for debugging
-                logger.warning(f"JSON validation failed at char {e.pos}: {e.msg}")
-                # Attempt to fix common issues with the JSON
-                if "control character" in str(e):
-                    # Convert the string to bytes, decode with errors='ignore' to remove invalid chars
-                    response_text = response_text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
-                
-                # Try once more to validate
-                try:
-                    json.loads(response_text)
-                    logger.info("JSON was fixed successfully after cleaning")
-                except json.JSONDecodeError:
-                    logger.warning("JSON still invalid after cleaning")
-            
-            return response_text.strip()
-            
-        except Exception as e:
-            logger.error(f"Error cleaning JSON response: {str(e)}")
-            logger.debug(f"Problematic response text: {response_text[:200]}...")
-            return response_text
