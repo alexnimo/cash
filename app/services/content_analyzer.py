@@ -109,7 +109,7 @@ async def handle_chunked_response(
             f"""
             Continue exactly from where you have stopped in the following provided response
             add only the missing data, exactly from the point where you have stopped,
-            pay attention if there is a missing charectres in the provided response that must be added such
+            pay attention if there is a missing charecters in the provided response that must be added such
             a missing quate " or colon - this is crucial to complete the previous chunked response in case it's missing
             don't add any greetings or extra messages, follow the original prompt\n\n
             Original prompt:\n{original_prompt}\n\n
@@ -132,6 +132,7 @@ async def handle_chunked_response(
                         file_name = item["file_data"].display_name
                         file_uri = getattr(item["file_data"], "uri", "unknown_uri")
                         print(f"{BLUE}  - File {idx+1}: {file_name} (URI: {file_uri[:30]}...){RESET}")
+                print(f"{BLUE}======================================={RESET}")
                 
                 contents.extend(additional_contents)
                 logger.info(f"Including {len(additional_contents)} additional content items in continuation request")
@@ -154,12 +155,81 @@ async def handle_chunked_response(
             # Append to combined text
             continuation_text = current_response.text.strip()
             
-            # Clean continuation text - remove leading '[' that breaks JSON structure
+            # First clean continuation text - remove leading '[' that breaks JSON structure
             if continuation_text.startswith('['):
                 logger.info("Removing leading '[' from continuation response to maintain JSON structure")
                 continuation_text = continuation_text[1:]
             
-            combined_text += continuation_text
+            # Check for potentially incomplete sections and handle proper JSON structure
+            json_fixed = False
+            try:
+                # Try to parse the current combined text to see if it's valid JSON array
+                try:
+                    json.loads(f"[{combined_text}]")
+                    # If it parses successfully, no fixing needed
+                    json_fixed = False
+                except json.JSONDecodeError as e:
+                    # Extract position from error
+                    error_msg = str(e)
+                    logger.info(f"JSON validation error: {error_msg}")
+                    
+                    # Look for character position in error message
+                    import re
+                    char_match = re.search(r'char (\d+)', error_msg)
+                    if char_match:
+                        err_pos = int(char_match.group(1))
+                        
+                        # Adjust position since we wrapped with []
+                        err_pos = max(0, err_pos - 1)  
+                        
+                        if 0 <= err_pos < len(combined_text):
+                            # Find the start of the incomplete section by looking for the nearest '{' before error
+                            section_start = combined_text.rfind('{\n', 0, err_pos)
+                            
+                            if section_start >= 0:
+                                logger.info(f"Found incomplete section starting at position {section_start} (error at char {err_pos})")
+                                
+                                # Remove the incomplete section
+                                combined_text = combined_text[:section_start]
+                                logger.info(f"Removed incomplete section from position {section_start} to maintain JSON structure")
+                                
+                                # Also check if we need to remove trailing comma from previous section
+                                combined_text = combined_text.rstrip()
+                                if combined_text.endswith(','):
+                                    combined_text = combined_text[:-1]
+                                
+                                # Mark that we've fixed the JSON
+                                json_fixed = True
+            except Exception as e:
+                logger.warning(f"Error handling incomplete JSON sections: {str(e)}")
+            
+            # Append the continuation with proper comma handling
+            if combined_text and continuation_text:
+                combined_text = combined_text.rstrip()
+                
+                # If we fixed the JSON by removing an incomplete section, we need to check the structure
+                if json_fixed:
+                    # If we removed an incomplete section, the combined_text should end with a complete section (}).
+                    # We should add a comma before appending the continuation.
+                    if combined_text.endswith('}'):
+                        combined_text += ', ' + continuation_text
+                    else:
+                        # If it doesn't end with }, just append with space
+                        combined_text += ' ' + continuation_text
+                else:
+                    # Standard handling if no JSON fixing was done
+                    if combined_text.endswith(','):
+                        # Already has comma, just append
+                        combined_text += ' ' + continuation_text
+                    elif combined_text.endswith('}'):
+                        # Last section completed, add comma before next section
+                        combined_text += ', ' + continuation_text
+                    else:
+                        # Other cases, just append
+                        combined_text += ' ' + continuation_text
+            else:
+                # First response or empty text, just assign
+                combined_text += continuation_text
             
             print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
             logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)})")
