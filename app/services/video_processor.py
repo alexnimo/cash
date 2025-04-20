@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple, Union
 import os
 from pathlib import Path
 import logging
@@ -12,17 +12,43 @@ from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFoun
 from app.utils.langtrace_utils import get_langtrace, init_langtrace
 from app.utils.path_utils import get_storage_subdir, get_storage_path
 import google.generativeai as genai
+from google.generativeai.types import GenerateContentResponse
 from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata, VideoAnalysis
-from app.models.transcript import TranscriptSegment
 from app.core.settings import get_settings
 from app.services.model_manager import ModelManager
 from app.services.model_config import configure_models
 from app.services.content_analyzer import ContentAnalyzer
 from app.services.errors import VideoProcessingError
+from app.services.json_utils import lint_json, fix_json, clean_json_response
 import re
+
+class TranscriptSegment:
+    """Represents a segment of a transcript with timestamp information."""
+    
+    def __init__(self, start_time: float, end_time: float, text: str, language: str = None):
+        self.start = start_time
+        self.end = end_time
+        self.text = text
+        self.language = language
+    
+    def to_dict(self):
+        """Convert segment to dictionary representation."""
+        return {
+            "start": self.start,
+            "end": self.end,
+            "text": self.text,
+            "duration": self.end - self.start,
+            "language": self.language
+        }
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# ANSI color codes for terminal output
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+RESET = "\033[0m"
 
 # Initialize LangTrace at module level
 _tracer = init_langtrace()
@@ -33,6 +59,245 @@ else:
 
 # Configure models
 configure_models()
+
+def is_response_truncated(response: GenerateContentResponse) -> bool:
+    """
+    Detects if a response from Gemini API was truncated due to token limits.
+    
+    Args:
+        response: The raw response object from Gemini API
+        
+    Returns:
+        bool: True if the response was truncated, False otherwise
+    """
+    try:
+        # Check if response was truncated due to MAX_TOKENS
+        finish_reason = response.candidates[0].finish_reason
+        
+        # Check if the finish_reason.name is "MAX_TOKENS"
+        is_truncated = hasattr(finish_reason, 'name') and finish_reason.name == "MAX_TOKENS"
+        
+        if is_truncated:
+            logger.info("Response was truncated due to token limit (FINISH_REASON_MAX_TOKENS)")
+        else:
+            logger.info(f"Response finish reason: {finish_reason} (not truncated)")
+        
+        return is_truncated
+    except (AttributeError, IndexError) as e:
+        logger.warning(f"Could not determine if response was truncated: {str(e)}")
+        return False
+
+async def handle_chunked_response(
+    model: Any, 
+    original_prompt: str, 
+    first_response: GenerateContentResponse, 
+    content_generator_kwargs: Dict[str, Any] = None,
+    max_continuation_attempts: int = 5,
+    additional_contents: List[Dict[str, Any]] = None,
+    is_json: bool = False
+) -> str:
+    """
+    Handles chunked responses by continuing the generation until complete.
+    
+    Args:
+        model: The Gemini model instance
+        original_prompt: The original prompt sent to the model
+        first_response: The first (potentially truncated) response from the model
+        content_generator_kwargs: Additional kwargs for model.generate_content
+        max_continuation_attempts: Maximum number of continuation attempts
+        additional_contents: Additional content items (like file_data) to include in continuation requests
+        is_json: Whether the response is expected to be JSON format
+        
+    Returns:
+        str: The complete response text
+    """
+    if not content_generator_kwargs:
+        content_generator_kwargs = {}
+        
+    # Get the text from the first response
+    combined_text = first_response.text.strip()
+    
+    # Check if response is truncated
+    if not is_response_truncated(first_response):
+        print(f"{GREEN}✓ Response is complete (not truncated){RESET}")
+        return combined_text
+    
+    print(f"{YELLOW}! Initial response is truncated. Starting continuation process...{RESET}")
+    
+    # Initialize for continuation
+    current_response = first_response
+    continuation_attempts = 0
+    
+    # Continue generating content until the response is complete or max attempts reached
+    while is_response_truncated(current_response) and continuation_attempts < max_continuation_attempts:
+        continuation_attempts += 1
+        print(f"{YELLOW}! Making continuation request (attempt {continuation_attempts}/{max_continuation_attempts}){RESET}")
+        logger.info(f"Making continuation request (attempt {continuation_attempts}/{max_continuation_attempts})")
+        
+        # Build continuation prompt
+        continuation_prompt = (
+            f"""
+            Continue exactly from where you have stopped in the following provided response
+            add only the missing data, exactly from the point where you have stopped,
+            pay attention if there is a missing charecters in the provided response that must be added such
+            a missing quate " or colon - this is crucial to complete the previous chunked response in case it's missing
+            don't add any greetings or extra messages, follow the original prompt\n\n
+            Original prompt:\n{original_prompt}\n\n
+            Previous truncated response:\n{combined_text}   
+            """
+        )
+        
+        try:
+            # Prepare contents for continuation
+            contents = [{"text": continuation_prompt}]
+            
+            # Add any additional file data or other contents
+            if additional_contents:
+                contents.extend(additional_contents)
+                logger.info(f"Including {len(additional_contents)} additional content items in continuation request")
+            
+            # Generate continuation
+            current_response = await asyncio.to_thread(
+                model.generate_content,
+                contents=contents,
+                **content_generator_kwargs
+            )
+            
+            # Check for finish reason
+            finish_reason = None
+            if hasattr(current_response, "candidates") and current_response.candidates:
+                finish_reason = current_response.candidates[0].finish_reason
+                print(f"{BLUE}ℹ Continuation {continuation_attempts} finish reason: {finish_reason}{RESET}")
+            
+            # Append to combined text
+            continuation_text = current_response.text.strip()
+            
+            # Check if we're dealing with JSON content structure
+            if is_json:
+                logger.info("Detected JSON-like content, using smart continuations")
+                
+                # 1. Clean up continuation text (remove leading markers)
+                if continuation_text.startswith('['):
+                    logger.info("Removing leading '[' from continuation response")
+                    continuation_text = continuation_text[1:]
+                
+                # 2. Analyze combined structure for proper joining
+                try:
+                    # Identify the last complete valid JSON element
+                    last_obj_or_array_end = -1
+                    for i in range(len(combined_text) - 1, -1, -1):
+                        if combined_text[i] in ']}' and combined_text[i-1] not in '\\"':
+                            last_obj_or_array_end = i
+                            break
+                    
+                    # Find whether there's a pending comma or if we need to add one
+                    # First check if we're inside an array or object
+                    brackets_stack = []
+                    for char in combined_text:
+                        if char in '[{':
+                            brackets_stack.append(char)
+                        elif char in ']}' and brackets_stack:
+                            brackets_stack.pop()
+                    
+                    outermost_open = brackets_stack[0] if brackets_stack else None
+                    inside_collection = bool(brackets_stack)
+                    
+                    # Trim the combined text if needed to ensure proper continuation
+                    if last_obj_or_array_end > 0:
+                        # Find the next non-whitespace character after the end
+                        next_char_pos = -1
+                        for i in range(last_obj_or_array_end + 1, len(combined_text)):
+                            if not combined_text[i].isspace():
+                                next_char_pos = i
+                                break
+                        
+                        # If the next char is a comma, we need to keep it
+                        if next_char_pos != -1 and combined_text[next_char_pos] == ',':
+                            combined_text = combined_text[:next_char_pos + 1].rstrip()
+                            logger.info("Trimmed to last complete JSON element with trailing comma")
+                        # If the next char is closing bracket/brace, we're done with the JSON
+                        elif next_char_pos != -1 and combined_text[next_char_pos] in ']}': 
+                            combined_text = combined_text[:next_char_pos + 1].rstrip()
+                            logger.info("Combined text is already a complete JSON structure")
+                            # No need to continue since we have complete JSON
+                            break  
+                        else:
+                            # Otherwise, keep only up to the last complete element
+                            combined_text = combined_text[:last_obj_or_array_end + 1].rstrip()
+                            logger.info("Trimmed to last complete JSON element")
+                            
+                            # Add a comma if we're inside a collection and don't already end with one
+                            if inside_collection and not combined_text.endswith(',') and not combined_text.endswith(outermost_open):
+                                combined_text += ','
+                                logger.info("Added comma to prepare for continuation")
+                except Exception as e:
+                    logger.warning(f"Error during JSON structure analysis: {str(e)}")
+                
+                # 3. Join the two pieces smartly
+                # Check if the continuation starts with a comma or needs one
+                continuation_text = continuation_text.lstrip()
+                if continuation_text.startswith(','):
+                    # Avoid duplicate commas
+                    if combined_text.endswith(','):
+                        continuation_text = continuation_text[1:].lstrip()
+                        logger.info("Removed leading comma from continuation to avoid duplicates")
+                # Or maybe we need to add one
+                elif not combined_text.endswith(',') and inside_collection and not combined_text.endswith(outermost_open):
+                    # Don't add comma if continuation is closing the collection
+                    if not continuation_text.strip().startswith(']') and not continuation_text.strip().startswith('}'):
+                        continuation_text = ',' + continuation_text
+                        logger.info("Added comma between elements for proper JSON continuation")
+            
+            # Now append in all cases
+            combined_text += continuation_text
+            
+            print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
+            logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)})")
+            
+            # If not truncated, we're done
+            if not is_response_truncated(current_response):
+                print(f"{GREEN}✓ Response continuation complete (not truncated){RESET}")
+                logger.info("Response continuation complete (not truncated)")
+                break
+            else:
+                print(f"{YELLOW}! Continuation {continuation_attempts} was still truncated, continuing...{RESET}")
+                
+        except Exception as e:
+            print(f"{YELLOW}✗ Error during continuation attempt {continuation_attempts}: {str(e)}{RESET}")
+            logger.error(f"Error during continuation attempt {continuation_attempts}: {str(e)}")
+            break
+    
+    # Before returning, try to validate and fix the JSON if needed
+    if is_json:
+        try:
+            # Try to parse as JSON first
+            try:
+                json.loads(combined_text)
+                logger.info("Final chunked response is valid JSON, no fixes needed")
+            except json.JSONDecodeError:
+                # If parsing fails, use our linter and fixer
+                logger.info("Final chunked response appears to be JSON but has issues, attempting to fix...")
+                error_info = lint_json(combined_text)
+                
+                if error_info:
+                    logger.warning(f"JSON issues in final combined response: {error_info['readable_error']}")
+                    fixed_json, fixes_applied = fix_json(combined_text)
+                    
+                    if fixed_json:
+                        logger.info(f"Successfully fixed JSON issues in chunked response. Fixes: {len(fixes_applied)}")
+                        # Verify the fixed JSON is valid
+                        try:
+                            json.loads(fixed_json)
+                            combined_text = fixed_json  # Use the fixed version
+                            logger.info("Using fixed JSON for final response")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Fixed JSON still invalid: {str(e)}")
+                    else:
+                        logger.warning(f"Could not fix JSON issues in chunked response: {fixes_applied}")
+        except Exception as e:
+            logger.warning(f"Error validating final chunked response as JSON: {str(e)}")
+    
+    return combined_text
 
 class VideoProcessor:
     def __init__(self, video_status: Dict[str, Dict]):
@@ -498,7 +763,7 @@ class VideoProcessor:
             raise VideoProcessingError(f"Failed to extract metadata: {str(e)}")
 
     async def _generate_transcript(self, audio_path: str) -> List[TranscriptSegment]:
-        """Generate transcript from audio file using Gemini"""
+        """Generate transcript from audio file using Gemini with chunking support for long responses"""
         try:
             logger.info(f"Generating transcript for audio {audio_path}")
             
@@ -515,16 +780,58 @@ class VideoProcessor:
                         text=entry['text'],
                         language=transcript_data["language"]
                     ) for entry in transcript_data["segments"]]
-                    
+            
             # If no transcript exists, generate one
+            raw_text = None
             try:
                 # Add exponential backoff retry logic
                 base_delay = 1  # Start with 1 second delay
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
-                        # Single Gemini API call to get transcript
-                        raw_text = await self.model_manager.transcribe_audio(audio_path)
+                        # Get the Gemini model response with chunking support
+                        model = self.model_manager.get_transcription_model_instance()
+                        
+                        # Create transcription prompt
+                        transcription_prompt = """
+                        Your task is to provide a complete and accurate transcription of the entire audio file.
+                        Requirements:
+                        1. Transcribe ALL spoken content from start to finish
+                        2. Do not skip or summarize any parts
+                        3. Format as plain text without timestamps or speaker labels
+                        4. Maintain word-for-word accuracy
+                        5. Include every single word that is spoken
+                        
+                        Important: The transcription must be complete and cover the entire duration of the audio.
+                        """
+                        
+                        # Upload audio file
+                        audio_file = genai.upload_file(audio_path, mime_type="audio/wav")
+                        logger.info(f"Successfully uploaded audio file: {audio_path}")
+                        
+                        # Generate initial response
+                        initial_response = await asyncio.to_thread(
+                            model.generate_content, 
+                            contents=[transcription_prompt, audio_file],
+                            request_options={"timeout": 1000}
+                        )
+                        
+                        # Check if response is truncated and handle chunking if needed
+                        if is_response_truncated(initial_response):
+                            logger.info("Initial transcription response was truncated, using chunking mechanism")
+                            # Use chunking for potentially long responses
+                            raw_text = await handle_chunked_response(
+                                model=model,
+                                original_prompt=transcription_prompt,
+                                first_response=initial_response,
+                                additional_contents=[audio_file],
+                                max_continuation_attempts=5,
+                                is_json=False  # Raw transcript is not JSON
+                            )
+                        else:
+                            # Response was not truncated, use it directly
+                            raw_text = initial_response.text.strip()
+                        
                         if not raw_text:
                             raise VideoProcessingError("Received empty transcript from model")
                         

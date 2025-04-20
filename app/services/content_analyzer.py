@@ -2,6 +2,7 @@ import json
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple, Union
+from app.services.json_utils import lint_json, fix_json, clean_json_response
 from pathlib import Path
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, GenerateContentResponse
@@ -26,6 +27,7 @@ from app.services.video_processor import Video
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 BLUE = "\033[94m"
+RED = "\033[91m"  # Added missing RED color
 RESET = "\033[0m"
 
 logger = logging.getLogger(__name__)
@@ -155,81 +157,89 @@ async def handle_chunked_response(
             # Append to combined text
             continuation_text = current_response.text.strip()
             
-            # First clean continuation text - remove leading '[' that breaks JSON structure
-            if continuation_text.startswith('['):
-                logger.info("Removing leading '[' from continuation response to maintain JSON structure")
-                continuation_text = continuation_text[1:]
+            # Check if we're dealing with JSON content structure
+            is_json_content = (
+                (combined_text.strip().startswith('[') or combined_text.strip().startswith('{')) and 
+                ('"' in combined_text or "'" in combined_text)  # Simple heuristic for JSON-like content
+            )
             
-            # Check for potentially incomplete sections and handle proper JSON structure
-            json_fixed = False
-            try:
-                # Try to parse the current combined text to see if it's valid JSON array
-                try:
-                    json.loads(f"[{combined_text}]")
-                    # If it parses successfully, no fixing needed
-                    json_fixed = False
-                except json.JSONDecodeError as e:
-                    # Extract position from error
-                    error_msg = str(e)
-                    logger.info(f"JSON validation error: {error_msg}")
-                    
-                    # Look for character position in error message
-                    import re
-                    char_match = re.search(r'char (\d+)', error_msg)
-                    if char_match:
-                        err_pos = int(char_match.group(1))
-                        
-                        # Adjust position since we wrapped with []
-                        err_pos = max(0, err_pos - 1)  
-                        
-                        if 0 <= err_pos < len(combined_text):
-                            # Find the start of the incomplete section by looking for the nearest '{' before error
-                            section_start = combined_text.rfind('{\n', 0, err_pos)
-                            
-                            if section_start >= 0:
-                                logger.info(f"Found incomplete section starting at position {section_start} (error at char {err_pos})")
-                                
-                                # Remove the incomplete section
-                                combined_text = combined_text[:section_start]
-                                logger.info(f"Removed incomplete section from position {section_start} to maintain JSON structure")
-                                
-                                # Also check if we need to remove trailing comma from previous section
-                                combined_text = combined_text.rstrip()
-                                if combined_text.endswith(','):
-                                    combined_text = combined_text[:-1]
-                                
-                                # Mark that we've fixed the JSON
-                                json_fixed = True
-            except Exception as e:
-                logger.warning(f"Error handling incomplete JSON sections: {str(e)}")
-            
-            # Append the continuation with proper comma handling
-            if combined_text and continuation_text:
-                combined_text = combined_text.rstrip()
+            if is_json_content:
+                logger.info("Detected JSON-like content, using smart continuations")
                 
-                # If we fixed the JSON by removing an incomplete section, we need to check the structure
-                if json_fixed:
-                    # If we removed an incomplete section, the combined_text should end with a complete section (}).
-                    # We should add a comma before appending the continuation.
-                    if combined_text.endswith('}'):
-                        combined_text += ', ' + continuation_text
-                    else:
-                        # If it doesn't end with }, just append with space
-                        combined_text += ' ' + continuation_text
-                else:
-                    # Standard handling if no JSON fixing was done
+                # 1. Clean up continuation text (remove leading markers)
+                if continuation_text.startswith('['):
+                    logger.info("Removing leading '[' from continuation response")
+                    continuation_text = continuation_text[1:]
+                
+                # 2. Analyze combined structure for proper joining
+                try:
+                    # Identify the last complete valid JSON element
+                    last_obj_or_array_end = -1
+                    for i in range(len(combined_text) - 1, -1, -1):
+                        if combined_text[i] in ']}' and combined_text[i-1] not in '\\"':
+                            last_obj_or_array_end = i
+                            break
+                    
+                    # Find whether there's a pending comma or if we need to add one
+                    # First check if we're inside an array or object
+                    brackets_stack = []
+                    for char in combined_text:
+                        if char in '[{':
+                            brackets_stack.append(char)
+                        elif char in ']}' and brackets_stack:
+                            brackets_stack.pop()
+                    
+                    outermost_open = brackets_stack[0] if brackets_stack else None
+                    inside_collection = bool(brackets_stack)
+                    
+                    # Trim the combined text if needed to ensure proper continuation
+                    if last_obj_or_array_end > 0:
+                        # Find the next non-whitespace character after the end
+                        next_char_pos = -1
+                        for i in range(last_obj_or_array_end + 1, len(combined_text)):
+                            if not combined_text[i].isspace():
+                                next_char_pos = i
+                                break
+                        
+                        # If the next char is a comma, we need to keep it
+                        if next_char_pos != -1 and combined_text[next_char_pos] == ',':
+                            combined_text = combined_text[:next_char_pos + 1].rstrip()
+                            logger.info("Trimmed to last complete JSON element with trailing comma")
+                        # If the next char is closing bracket/brace, we're done with the JSON
+                        elif next_char_pos != -1 and combined_text[next_char_pos] in ']}': 
+                            combined_text = combined_text[:next_char_pos + 1].rstrip()
+                            logger.info("Combined text is already a complete JSON structure")
+                            # No need to continue since we have complete JSON
+                            break  
+                        else:
+                            # Otherwise, keep only up to the last complete element
+                            combined_text = combined_text[:last_obj_or_array_end + 1].rstrip()
+                            logger.info("Trimmed to last complete JSON element")
+                            
+                            # Add a comma if we're inside a collection and don't already end with one
+                            if inside_collection and not combined_text.endswith(',') and not combined_text.endswith(outermost_open):
+                                combined_text += ','
+                                logger.info("Added comma to prepare for continuation")
+                except Exception as e:
+                    logger.warning(f"Error during JSON structure analysis: {str(e)}")
+                
+                # 3. Join the two pieces smartly
+                # Check if the continuation starts with a comma or needs one
+                continuation_text = continuation_text.lstrip()
+                if continuation_text.startswith(','):
+                    # Avoid duplicate commas
                     if combined_text.endswith(','):
-                        # Already has comma, just append
-                        combined_text += ' ' + continuation_text
-                    elif combined_text.endswith('}'):
-                        # Last section completed, add comma before next section
-                        combined_text += ', ' + continuation_text
-                    else:
-                        # Other cases, just append
-                        combined_text += ' ' + continuation_text
-            else:
-                # First response or empty text, just assign
-                combined_text += continuation_text
+                        continuation_text = continuation_text[1:].lstrip()
+                        logger.info("Removed leading comma from continuation to avoid duplicates")
+                # Or maybe we need to add one
+                elif not combined_text.endswith(',') and inside_collection and not combined_text.endswith(outermost_open):
+                    # Don't add comma if continuation is closing the collection
+                    if not continuation_text.strip().startswith(']') and not continuation_text.strip().startswith('}'):
+                        continuation_text = ',' + continuation_text
+                        logger.info("Added comma between elements for proper JSON continuation")
+            
+            # Now append in all cases
+            combined_text += continuation_text
             
             print(f"{GREEN}✓ Added continuation {continuation_attempts} (length: {len(continuation_text)} chars){RESET}")
             logger.info(f"Added continuation {continuation_attempts} (length: {len(continuation_text)})")
@@ -246,6 +256,36 @@ async def handle_chunked_response(
             print(f"{YELLOW}✗ Error during continuation attempt {continuation_attempts}: {str(e)}{RESET}")
             logger.error(f"Error during continuation attempt {continuation_attempts}: {str(e)}")
             break
+    
+    # Before returning, try to validate and fix the JSON if it's likely to be a JSON structure
+    if combined_text.strip().startswith('[') and combined_text.strip().endswith(']'):
+        try:
+            # Try to parse as JSON first
+            try:
+                json.loads(combined_text)
+                logger.info("Final chunked response is valid JSON, no fixes needed")
+            except json.JSONDecodeError:
+                # If parsing fails, use our linter and fixer
+                logger.info("Final chunked response appears to be JSON but has issues, attempting to fix...")
+                error_info = lint_json(combined_text)
+                
+                if error_info:
+                    logger.warning(f"JSON issues in final combined response: {error_info['readable_error']}")
+                    fixed_json, fixes_applied = fix_json(combined_text)
+                    
+                    if fixed_json:
+                        logger.info(f"Successfully fixed JSON issues in chunked response. Fixes: {len(fixes_applied)}")
+                        # Verify the fixed JSON is valid
+                        try:
+                            json.loads(fixed_json)
+                            combined_text = fixed_json  # Use the fixed version
+                            logger.info("Using fixed JSON for final response")
+                        except json.JSONDecodeError as e:
+                            logger.error(f"Fixed JSON still invalid: {str(e)}")
+                    else:
+                        logger.warning(f"Could not fix JSON issues in chunked response: {fixes_applied}")
+        except Exception as e:
+            logger.warning(f"Error validating final chunked response as JSON: {str(e)}")
     
     return combined_text
 
@@ -508,6 +548,18 @@ class ContentAnalyzer:
                         # Parse JSON directly - no sanitization or validation
                         sections = json.loads(response_text)
                         
+                        # Save the complete frame analysis with all details
+                        frame_analysis_path = self.summaries_dir / f"{video.id}_frames_analysis.json"
+                        with open(frame_analysis_path, 'w', encoding='utf-8') as f:
+                            json.dump(sections, f, indent=2)
+                        print(f"{GREEN}Saved complete frames analysis to {frame_analysis_path}{RESET}")
+                        logger.info(f"Saved complete frames analysis to {frame_analysis_path}")
+                        
+                        # Ensure the sections include frame_paths before storing
+                        for section in sections:
+                            if 'frame_paths' not in section:
+                                section['frame_paths'] = []
+                        
                         # Store the parsed sections directly
                         summary["sections"] = sections
                         return summary
@@ -605,73 +657,181 @@ class ContentAnalyzer:
                 content_generator_kwargs={'generation_config': generation_config}
             )
             
-            # Log partial response for debugging
-            logger.info(f"Response first 500 chars: {response_text[:500]}...")
+            # Clean the response text of any markdown or unwanted artifacts
+            logger.info("Cleaning response of any markdown or other artifacts")
+            cleaned_response = clean_json_response(response_text)
             
-            # Save raw response
+            # Log partial response for debugging
+            logger.info(f"Response first 500 chars: {cleaned_response[:500]}...")
+            
+            # Save raw and cleaned responses
             raw_response_path = self.summaries_dir / f"{video.id}_raw_response.txt"
             with open(raw_response_path, 'w', encoding='utf-8') as f:
                 f.write(response_text)
             logger.info(f"Saved raw response to {raw_response_path}")
             
-            # Direct JSON parsing - minimal approach
+            cleaned_response_path = self.summaries_dir / f"{video.id}_cleaned_response.json"
+            with open(cleaned_response_path, 'w', encoding='utf-8') as f:
+                f.write(cleaned_response)
+            logger.info(f"Saved cleaned response to {cleaned_response_path}")
+            
+            # Use our JSON linter and fixer for robust parsing
+            logger.info("Validating and potentially fixing JSON response...")
+            
+            # Important: Instead of parsing the JSON ourselves, just treat everything as a string
+            # and pass it directly to the output structure. This preserves the actual content
+            # even if it has JSON issues.
+            
+            # First try direct JSON parsing just to see if it works
             try:
-                # Parse JSON directly - no sanitization or validation
-                sections = json.loads(response_text)
+                # Try parsing - this is just to check validity
+                json.loads(cleaned_response)
+                logger.info("JSON response is valid on first attempt")
+                # But we won't use this parsed object directly
+            except json.JSONDecodeError as e:
+                # JSON parsing failed, use our linter to identify issues
+                logger.warning(f"JSON parsing failed: {str(e)}")
+                print(f"\033[93m⚠️ \033[91mWARNING: JSON PARSING FAILED - continuing with original structure\033[0m")
                 
-                # Create the analysis object
+                # Try to fix the JSON - optional step
+                try:
+                    fixed_json, fixes_applied = fix_json(cleaned_response)
+                    if fixed_json:
+                        logger.info(f"Successfully fixed JSON. Fixes applied: {len(fixes_applied)}")
+                        # Save the fixed JSON as the cleaned response
+                        cleaned_response = fixed_json
+                        # Save for debugging
+                        fixed_path = self.summaries_dir / f"{video.id}_fixed_response.json"
+                        with open(fixed_path, 'w', encoding='utf-8') as f:
+                            f.write(fixed_json)
+                except Exception as fix_error:
+                    logger.warning(f"Error during JSON fixing: {str(fix_error)}")
+            
+            # The key insight: Don't try to parse the JSON again, just use the raw string
+            # which already has the structure we want, even if it's not perfectly valid JSON
+            
+            # We'll trick the system by creating a pre-structure with the cleaned response
+            # embedded in it as the 'sections' field directly
+            sections = cleaned_response  # This is a string, not a list!
+            
+            # Create the analysis object with special handling for sections
+            # If sections is already a list (parsed successfully), use it directly
+            # If it's a string (the cleaned_response), we need to save it differently
+            if isinstance(sections, str):
+                # Special handling for string sections - we'll save a modified structure
+                # that will preserve the JSON structure in the output file
+                sections_str = sections
+                try:
+                    # Try to make the string into a proper JSON array if it isn't one already
+                    if not sections_str.strip().startswith('['):
+                        sections_str = f"[{sections_str}]"
+                    if not sections_str.strip().endswith(']'):
+                        sections_str = f"{sections_str}]"
+                    
+                    # We'll still try to create a proper JSON structure for the complete file
+                    # This builds a JSON object as a string, with the sections_str embedded directly
+                    raw_json = f'''{{
+  "Date": "{datetime.now().strftime('%B %d %Y')}",
+  "Channel name": "{video.metadata.channel_name if video.metadata else ''}",
+  "Video name": "{video.metadata.video_title if video.metadata else ''}",
+  "sections": {sections_str}
+}}'''
+                    
+                    # Save this directly without parsing
+                    direct_path = self.summaries_dir / f"{video.id}_direct_analysis.json"
+                    with open(direct_path, 'w', encoding='utf-8') as f:
+                        f.write(raw_json)
+                    logger.info(f"Saved direct analysis containing original sections structure to {direct_path}")
+                    
+                    # For the return value, we still need a Python dict
+                    # Try to parse it, but if it fails, use a minimal structure
+                    try:
+                        analysis_json = json.loads(raw_json)
+                        logger.info("Successfully parsed combined analysis JSON")
+                    except json.JSONDecodeError:
+                        # If that fails too, create a fallback structure that at least has the metadata
+                        analysis_json = {
+                            "Date": datetime.now().strftime("%B %d %Y"),
+                            "Channel name": video.metadata.channel_name if video.metadata else "",
+                            "Video name": video.metadata.video_title if video.metadata else "",
+                            "sections": []
+                        }
+                except Exception as e:
+                    logger.error(f"Error creating direct analysis: {str(e)}")
+                    # Fallback to standard structure
+                    analysis_json = {
+                        "Date": datetime.now().strftime("%B %d %Y"),
+                        "Channel name": video.metadata.channel_name if video.metadata else "",
+                        "Video name": video.metadata.video_title if video.metadata else "",
+                        "sections": []
+                    }
+            else:
+                # Normal case: sections is already a list
                 analysis_json = {
                     "Date": datetime.now().strftime("%B %d %Y"),
                     "Channel name": video.metadata.channel_name if video.metadata else "",
                     "Video name": video.metadata.video_title if video.metadata else "",
                     "sections": sections
                 }
-                
-                # Create overall summary from section summaries
-                overall_summary = "\n".join([
-                    section.get("overall_summary", "")
-                    for section in sections
-                ])
-                
-                # Return the full analysis
-                return {
-                    "raw_response": overall_summary,
-                    "stocks": sections,  # Keep original sections for compatibility
-                    "analysis_json": analysis_json
-                }
-                
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.error(f"Failed to parse JSON: {str(e)}")
-                
-                # Create error section
-                sections = [{"topic": "Parsing Error", "stocks": [], "start_time": 0, "end_time": 0, 
-                          "summary": "Failed to parse response", "key_points": [], 
-                          "overall_summary": f"Failed to parse: {str(e)}"}]
-                
-                analysis_json = {
-                    "Date": datetime.now().strftime("%B %d %Y"),
-                    "Channel name": video.metadata.channel_name if video.metadata else "",
-                    "Video name": video.metadata.video_title if video.metadata else "",
-                    "sections": sections
-                }
-                
-                # Save the error response for debugging
-                error_response_path = self.summaries_dir / f"{video.id}_error_response.txt"
-                with open(error_response_path, 'w', encoding='utf-8') as f:
-                    f.write(f"Error parsing JSON: {str(e)}\n\nRaw response:\n{response_text}")
-                logger.error(f"Saved error response to {error_response_path}")
-                
-                # Return valid structure with raw response
-                return {
-                    "raw_response": f"Failed to parse: {str(e)}",
-                    "stocks": sections,
-                    "analysis_json": analysis_json
-                }
+            
+            # Create overall summary safely
+            try:
+                if isinstance(sections, list):
+                    overall_summary = "\n".join([
+                        section.get("overall_summary", "")
+                        for section in sections
+                    ])
+                else:
+                    overall_summary = "Analysis summary"  # Fallback
+            except Exception as e:
+                logger.warning(f"Error creating overall summary: {str(e)}")
+                overall_summary = "Analysis summary"  # Fallback
+            
+            # Return the full analysis
+            return {
+                "raw_response": overall_summary,
+                "stocks": sections,  # Keep original sections for compatibility
+                "analysis_json": analysis_json
+            }
                 
         except Exception as e:
-            logger.error(f"Error in transcript processing: {str(e)}")
-            raise VideoProcessingError("Failed to analyze transcript content")
+            logger.exception(f"Error in transcript processing: {str(e)}")
+            print(f"\033[93m⚠️ \033[91mCRITICAL ERROR: Transcript processing failed - {str(e)}\033[0m")
+            
+            # Even on exception, create a valid structure to maintain compatibility
+            sections = [{
+                "topic": "processing error",
+                "stocks": [],
+                "start_time": 0.0,
+                "end_time": 0.0,
+                "summary": "Unable to process transcript",
+                "key_points": ["Processing encountered an error"],
+                "overall_summary": f"Processing error encountered. Raw transcript length: {len(raw_transcript)} characters"
+            }]
+            
+            # Create the analysis object with standard structure despite error
+            analysis_json = {
+                "Date": datetime.now().strftime("%B %d %Y"),
+                "Channel name": video.metadata.channel_name if video.metadata else "",
+                "Video name": video.metadata.video_title if video.metadata else "",
+                "sections": sections
+            }
+            
+            # Save error for debugging
+            error_path = self.summaries_dir / f"{video.id}_transcript_processing_error.txt"
+            with open(error_path, 'w', encoding='utf-8') as f:
+                f.write(f"Error: {str(e)}\n\nTraceback information saved in logs")
+            logger.error(f"Saved error info to {error_path} (processing error)")
+            
+            # Return standard structure despite error
+            return {
+                "raw_response": "Processing error",
+                "stocks": sections,
+                "analysis_json": analysis_json
+            }
 
+
+    
     async def _save_combined_analysis(self, video: Video, analysis: Dict[str, Any]) -> str:
         """Save all analysis data in a single JSON file."""
         try:
@@ -694,13 +854,26 @@ class ContentAnalyzer:
                         logger.info("Successfully converted 'sections' string to JSON object")
                     except json.JSONDecodeError as e:
                         logger.error(f"Failed to parse 'sections' as JSON during save: {str(e)}")
+                        print(f"\033[93m⚠️ \033[91mWARNING: Sections parse error - Using raw text in analysis\033[0m")
+                        
+                        # Instead of failing, use the raw string in a synthetic section
+                        sections = [{
+                            "topic": "raw content",
+                            "stocks": [],
+                            "start_time": 0.0,
+                            "end_time": 0.0,
+                            "summary": "Content from unparsed sections",
+                            "key_points": ["Using raw text due to parsing error"],
+                            "overall_summary": sections[:1000] + "..." if len(sections) > 1000 else sections
+                        }]
+                        
                         # Save the problematic string for debugging
                         error_path = self.summaries_dir / f"{video.id}_sections_parse_error.txt"
                         with open(error_path, 'w', encoding='utf-8') as f:
                             f.write(f"Error: {str(e)}\n\nOriginal sections string:\n{sections}")
                         logger.error(f"Saved sections parse error to {error_path}")
                 
-                # Create the output analysis structure
+                # Create the output analysis structure - maintain expected format
                 output_analysis = {
                     "Date": datetime.now().strftime("%B %d %Y"),
                     "Channel name": video.metadata.channel_name if video.metadata else "",
@@ -713,7 +886,46 @@ class ContentAnalyzer:
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(output_analysis, f, indent=2, ensure_ascii=False)
             
-            # Also save a final analysis file
+            # Prepare for the final analysis file - validate JSON first
+            # Convert to string with indentation for linting and fixing
+            json_string = json.dumps(output_analysis, indent=2, ensure_ascii=False)
+            
+            # Check if the JSON is valid (this should always be true at this point, but check anyway)
+            error_info = lint_json(json_string)
+            if error_info:
+                logger.warning(f"Found JSON issues in final analysis: {error_info['readable_error']}")
+                logger.info(f"Attempting to fix JSON issues before saving final analysis...")
+                print(f"\033[93m⚠️ \033[91mWARNING: JSON issues in final analysis - attempting fix\033[0m")
+                
+                # Try to fix JSON
+                fixed_json, fixes_applied = fix_json(json_string)
+                if fixed_json:
+                    logger.info(f"Successfully fixed JSON issues. Fixes applied: {len(fixes_applied)}")
+                    for fix in fixes_applied:
+                        logger.debug(f"JSON Fix: {fix}")
+                    
+                    # Parse the fixed JSON back to a Python object
+                    try:
+                        output_analysis = json.loads(fixed_json)
+                        logger.info("Successfully parsed fixed JSON back to Python object")
+                    except json.JSONDecodeError as e:
+                        # Even if parsing fails, continue with original structure
+                        # Just report the error but don't alter the output_analysis
+                        logger.error(f"Failed to parse fixed JSON: {str(e)}")
+                        print(f"\033[93m⚠️ \033[91mWARNING: Couldn't parse fixed JSON - continuing with original structure\033[0m")
+                        
+                        # Save the problematic fixed string for debugging
+                        error_path = self.summaries_dir / f"{video.id}_fixed_json_parse_error.txt"
+                        with open(error_path, 'w', encoding='utf-8') as f:
+                            f.write(f"Error: {str(e)}\n\nFixed JSON string:\n{fixed_json}")
+                        logger.error(f"Saved fixed JSON parse error to {error_path}")
+                else:
+                    logger.warning(f"Could not fix JSON issues. Fixes attempted: {fixes_applied}")
+                    print(f"\033[93m⚠️ \033[91mWARNING: Could not fix JSON issues - continuing with original structure\033[0m")
+            else:
+                logger.info("Final analysis JSON is valid, no fixes needed")
+                
+            # Save the final analysis file
             final_output_path = self.summaries_dir / f"{video.id}_final_analysis.json"
             with open(final_output_path, 'w', encoding='utf-8') as f:
                 json.dump(output_analysis, f, indent=2, ensure_ascii=False)

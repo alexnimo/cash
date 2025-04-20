@@ -288,6 +288,49 @@ class ModelManager:
         }
         
         return model, model_config
+        
+    def get_transcription_model_instance(self) -> Any:
+        """Get just the model instance for transcription (without config) for use with chunking"""
+        if not self.settings.model.transcription.enabled:
+            raise ValueError("Transcription is not enabled")
+        
+        # Get config for transcription model
+        transcription_config = self.model_configs[self.settings.model.transcription.name]
+        
+        # Configure the model with specific settings for transcription
+        model = genai.GenerativeModel(
+            model_name=transcription_config.name,
+            generation_config={
+                "temperature": transcription_config.temperature or 0.1,
+                "candidate_count": 1,
+                "top_p": 0.8,
+                "top_k": 40
+            },
+            safety_settings=[
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                }
+            ]
+        )
+        
+        return model
     
     @trace_gemini_call("generate_embedding")
     async def get_embedding_model(self) -> Tuple[Any, Dict[str, Any]]:
