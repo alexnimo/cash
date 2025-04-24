@@ -2,7 +2,7 @@ import json
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple, Union
-from app.services.json_utils import lint_json, fix_json, clean_json_response
+from json_repair import repair_json
 from pathlib import Path
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig, GenerateContentResponse
@@ -142,6 +142,25 @@ async def handle_chunked_response(
                 print(f"{YELLOW}⚠ No additional file data included in continuation request!{RESET}")
             
             # Generate continuation
+            # Add thinking_budget config if the model has it configured
+            if hasattr(model, '_thinking_budget'):
+                from google.generativeai.types import GenerateContentConfig, ThinkingConfig
+                thinking_config = ThinkingConfig(thinking_budget=model._thinking_budget)
+                model_config = GenerateContentConfig(thinking_config=thinking_config)
+                
+                # Update content_generator_kwargs with thinking_config
+                if 'generation_config' not in content_generator_kwargs:
+                    content_generator_kwargs['generation_config'] = model_config
+                else:
+                    # Preserve existing generation_config and add thinking_config
+                    existing_config = content_generator_kwargs['generation_config']
+                    content_generator_kwargs['generation_config'] = GenerateContentConfig(
+                        **existing_config.__dict__,
+                        thinking_config=thinking_config
+                    )
+                
+                logger.info(f"Using thinking_budget: {model._thinking_budget} for continuation request")
+                
             current_response = await asyncio.to_thread(
                 model.generate_content,
                 contents=contents,
@@ -267,23 +286,18 @@ async def handle_chunked_response(
             except json.JSONDecodeError:
                 # If parsing fails, use our linter and fixer
                 logger.info("Final chunked response appears to be JSON but has issues, attempting to fix...")
-                error_info = lint_json(combined_text)
-                
-                if error_info:
-                    logger.warning(f"JSON issues in final combined response: {error_info['readable_error']}")
-                    fixed_json, fixes_applied = fix_json(combined_text)
+                try:
+                    # Attempt to repair the JSON
+                    logger.warning("JSON issues in final combined response, attempting to repair...")
+                    fixed_json = repair_json(combined_text)
                     
-                    if fixed_json:
-                        logger.info(f"Successfully fixed JSON issues in chunked response. Fixes: {len(fixes_applied)}")
-                        # Verify the fixed JSON is valid
-                        try:
-                            json.loads(fixed_json)
-                            combined_text = fixed_json  # Use the fixed version
-                            logger.info("Using fixed JSON for final response")
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Fixed JSON still invalid: {str(e)}")
-                    else:
-                        logger.warning(f"Could not fix JSON issues in chunked response: {fixes_applied}")
+                    # Verify the fixed JSON is valid
+                    json.loads(fixed_json)
+                    logger.info("Successfully repaired JSON issues in chunked response")
+                    combined_text = fixed_json  # Use the fixed version
+                    logger.info("Using repaired JSON for final response")
+                except Exception as repair_error:
+                    logger.error(f"Failed to repair JSON: {str(repair_error)}")
         except Exception as e:
             logger.warning(f"Error validating final chunked response as JSON: {str(e)}")
     
@@ -327,6 +341,10 @@ class ContentAnalyzer:
         if not self.video_analysis_model:
             self.video_analysis_model = await self.model_manager.get_video_analysis_model()
         return self.video_analysis_model
+        
+    async def _get_frame_analysis_model(self):
+        """Get or initialize frame analysis model"""
+        return await self.model_manager.get_frame_analysis_model()
 
     async def _split_pdf_and_upload(self, pdf_path: str) -> List[Any]:
         """Split a PDF into smaller chunks for processing and upload each chunk."""
@@ -386,7 +404,7 @@ class ContentAnalyzer:
         """Analyze frames from PDF and update summary with best frames for each section."""
         try:
             # Get the model
-            model = await self._get_video_analysis_model()
+            model = await self._get_frame_analysis_model()
             
             # Load the summary
             with open(summary_json_path, 'r', encoding='utf-8') as f:
@@ -586,7 +604,7 @@ class ContentAnalyzer:
         """Process the transcript and generate a summary."""
         try:
             # Get the model
-            model = await self._get_video_analysis_model()
+            model = await self._get_frame_analysis_model()
             
             # Define the schema in the prompt
             prompt = f"""
@@ -659,7 +677,23 @@ class ContentAnalyzer:
             
             # Clean the response text of any markdown or unwanted artifacts
             logger.info("Cleaning response of any markdown or other artifacts")
-            cleaned_response = clean_json_response(response_text)
+            
+            # Find the start of a JSON object or array
+            start_brace = response_text.find('{')
+            start_bracket = response_text.find('[')
+            
+            # Determine the actual start position
+            if start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket):
+                start_index = start_brace
+            elif start_bracket != -1:
+                start_index = start_bracket
+            else:
+                # No JSON found, use original text
+                logger.warning("No JSON structure found in response")
+                start_index = 0
+                
+            # Extract text starting from the JSON structure
+            cleaned_response = response_text[start_index:]
             
             # Log partial response for debugging
             logger.info(f"Response first 500 chars: {cleaned_response[:500]}...")
@@ -693,19 +727,18 @@ class ContentAnalyzer:
                 logger.warning(f"JSON parsing failed: {str(e)}")
                 print(f"\033[93m⚠️ \033[91mWARNING: JSON PARSING FAILED - continuing with original structure\033[0m")
                 
-                # Try to fix the JSON - optional step
+                # Try to repair the JSON - optional step
                 try:
-                    fixed_json, fixes_applied = fix_json(cleaned_response)
-                    if fixed_json:
-                        logger.info(f"Successfully fixed JSON. Fixes applied: {len(fixes_applied)}")
-                        # Save the fixed JSON as the cleaned response
-                        cleaned_response = fixed_json
-                        # Save for debugging
-                        fixed_path = self.summaries_dir / f"{video.id}_fixed_response.json"
-                        with open(fixed_path, 'w', encoding='utf-8') as f:
-                            f.write(fixed_json)
-                except Exception as fix_error:
-                    logger.warning(f"Error during JSON fixing: {str(fix_error)}")
+                    fixed_json = repair_json(cleaned_response)
+                    logger.info("Successfully repaired JSON response")
+                    # Save the fixed JSON as the cleaned response
+                    cleaned_response = fixed_json
+                    # Save for debugging
+                    fixed_path = self.summaries_dir / f"{video.id}_fixed_response.json"
+                    with open(fixed_path, 'w', encoding='utf-8') as f:
+                        f.write(fixed_json)
+                except Exception as repair_error:
+                    logger.warning(f"Error during JSON repair: {str(repair_error)}")
             
             # The key insight: Don't try to parse the JSON again, just use the raw string
             # which already has the structure we want, even if it's not perfectly valid JSON
@@ -890,19 +923,24 @@ class ContentAnalyzer:
             # Convert to string with indentation for linting and fixing
             json_string = json.dumps(output_analysis, indent=2, ensure_ascii=False)
             
-            # Check if the JSON is valid (this should always be true at this point, but check anyway)
-            error_info = lint_json(json_string)
-            if error_info:
-                logger.warning(f"Found JSON issues in final analysis: {error_info['readable_error']}")
-                logger.info(f"Attempting to fix JSON issues before saving final analysis...")
-                print(f"\033[93m⚠️ \033[91mWARNING: JSON issues in final analysis - attempting fix\033[0m")
+            # Check if the JSON is valid and repair if needed
+            try:
+                # Try parsing - this is just to check validity
+                json.loads(json_string)
+                logger.info("Final analysis JSON is valid")
+            except json.JSONDecodeError as e:
+                # JSON parsing failed, try to repair it
+                logger.warning(f"Found JSON issues in final analysis: {str(e)}")
+                logger.info("Attempting to repair JSON issues before saving final analysis...")
+                print(f"\033[93m⚠️ \033[91mWARNING: JSON issues in final analysis - attempting repair\033[0m")
                 
-                # Try to fix JSON
-                fixed_json, fixes_applied = fix_json(json_string)
-                if fixed_json:
-                    logger.info(f"Successfully fixed JSON issues. Fixes applied: {len(fixes_applied)}")
-                    for fix in fixes_applied:
-                        logger.debug(f"JSON Fix: {fix}")
+                # Try to repair JSON
+                try:
+                    fixed_json = repair_json(json_string)
+                    json_string = fixed_json  # Use the repaired version
+                    logger.info("Successfully repaired JSON issues in final analysis")
+                except Exception as repair_error:
+                    logger.error(f"Failed to repair JSON: {str(repair_error)}")
                     
                     # Parse the fixed JSON back to a Python object
                     try:

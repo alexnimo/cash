@@ -3,6 +3,9 @@ from typing import Dict, List, Optional, Any, Tuple, Union
 import os
 from pathlib import Path
 import logging
+import math
+import uuid
+import shutil
 from moviepy import VideoFileClip, AudioFileClip
 import yt_dlp
 import json
@@ -19,8 +22,14 @@ from app.services.model_manager import ModelManager
 from app.services.model_config import configure_models
 from app.services.content_analyzer import ContentAnalyzer
 from app.services.errors import VideoProcessingError
-from app.services.json_utils import lint_json, fix_json, clean_json_response
 import re
+
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+    AudioSegment = None  # Define for type hinting
 
 class TranscriptSegment:
     """Represents a segment of a transcript with timestamp information."""
@@ -267,36 +276,6 @@ async def handle_chunked_response(
             logger.error(f"Error during continuation attempt {continuation_attempts}: {str(e)}")
             break
     
-    # Before returning, try to validate and fix the JSON if needed
-    if is_json:
-        try:
-            # Try to parse as JSON first
-            try:
-                json.loads(combined_text)
-                logger.info("Final chunked response is valid JSON, no fixes needed")
-            except json.JSONDecodeError:
-                # If parsing fails, use our linter and fixer
-                logger.info("Final chunked response appears to be JSON but has issues, attempting to fix...")
-                error_info = lint_json(combined_text)
-                
-                if error_info:
-                    logger.warning(f"JSON issues in final combined response: {error_info['readable_error']}")
-                    fixed_json, fixes_applied = fix_json(combined_text)
-                    
-                    if fixed_json:
-                        logger.info(f"Successfully fixed JSON issues in chunked response. Fixes: {len(fixes_applied)}")
-                        # Verify the fixed JSON is valid
-                        try:
-                            json.loads(fixed_json)
-                            combined_text = fixed_json  # Use the fixed version
-                            logger.info("Using fixed JSON for final response")
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Fixed JSON still invalid: {str(e)}")
-                    else:
-                        logger.warning(f"Could not fix JSON issues in chunked response: {fixes_applied}")
-        except Exception as e:
-            logger.warning(f"Error validating final chunked response as JSON: {str(e)}")
-    
     return combined_text
 
 class VideoProcessor:
@@ -445,29 +424,6 @@ class VideoProcessor:
             video.file_path = video_path
             logger.info(f"Video downloaded to {video_path}")
 
-            # Extract frames
-            logger.info(f"Extracting frames from video {video.id}")
-            frames = await self._extract_frames(video)
-            logger.debug(f"Extracted frames: {frames}")
-            
-            if frames:
-                # Update analysis with frame paths
-                if not video.analysis:
-                    logger.debug("Creating new VideoAnalysis with extracted frames")
-                    video.analysis = VideoAnalysis(
-                        transcript='',
-                        summary='',
-                        key_frames=frames,
-                        embedding_id=''
-                    )
-                else:
-                    logger.debug(f"Updating existing VideoAnalysis with {len(frames)} frames")
-                    video.analysis.key_frames = frames
-                logger.info(f"Extracted {len(frames)} frames")
-                self.video_status[video.id]["progress"]["extracting_frames"] = 100
-            else:
-                logger.warning("No frames were extracted")
-
             # Extract additional metadata if needed
             if not video.metadata:
                 logger.info(f"Extracting metadata for video {video.id}")
@@ -516,6 +472,29 @@ class VideoProcessor:
                 except Exception as e:
                     logger.error(f"Failed to generate transcript: {str(e)}")
                     raise VideoProcessingError(f"Failed to generate transcript: {str(e)}")
+                    
+            # Extract frames
+            logger.info(f"Extracting frames from video {video.id}")
+            frames = await self._extract_frames(video)
+            logger.debug(f"Extracted frames: {frames}")
+            
+            if frames:
+                # Update analysis with frame paths
+                if not video.analysis:
+                    logger.debug("Creating new VideoAnalysis with extracted frames")
+                    video.analysis = VideoAnalysis(
+                        transcript='',
+                        summary='',
+                        key_frames=frames,
+                        embedding_id=''
+                    )
+                else:
+                    logger.debug(f"Updating existing VideoAnalysis with {len(frames)} frames")
+                    video.analysis.key_frames = frames
+                logger.info(f"Extracted {len(frames)} frames")
+                self.video_status[video.id]["progress"]["extracting_frames"] = 100
+            else:
+                logger.warning("No frames were extracted")
 
             # Analyze content
             logger.info(f"Analyzing content for video {video.id}")
@@ -733,6 +712,62 @@ class VideoProcessor:
             logger.error(f"Failed to download audio: {str(e)}")
             raise VideoProcessingError(f"Failed to extract audio: {str(e)}")
 
+    async def _process_audio_chunk(self, chunk_path: Path) -> Optional[str]:
+        """Process a single audio chunk for transcription.
+        
+        Args:
+            chunk_path: Path to the audio chunk file
+            
+        Returns:
+            Optional[str]: Transcribed text or None if failed
+        """
+        logger.info(f"Processing audio chunk: {chunk_path}")
+        try:
+            # Initialize model manager if needed
+            if not hasattr(self, 'model_manager'):
+                self.model_manager = ModelManager(settings)
+                
+            # Upload the audio file
+            uploaded_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
+            logger.info(f"Uploaded audio chunk for processing: {uploaded_file.name}")
+            
+            # Create the transcription prompt
+            prompt = "Please provide a complete and accurate transcription of this audio. Maintain the original meaning and include all spoken content."
+            
+            # Get the model - use the synchronous version to avoid coroutine issues
+            model = self.model_manager.get_transcription_model_instance()
+            
+            # Generate content with audio input
+            response = await asyncio.to_thread(
+                model.generate_content, 
+                [
+                    prompt,
+                    uploaded_file
+                ],
+                generation_config={
+                    "temperature": 0.2,
+                }
+            )
+            
+            # Handle potentially chunked responses (if the transcription is long)
+            result = await handle_chunked_response(
+                model=model,
+                original_prompt=prompt,
+                first_response=response,
+                additional_contents=[uploaded_file],
+                max_continuation_attempts=5
+            )
+            
+            # Delete the uploaded file
+            await asyncio.to_thread(genai.delete_file, uploaded_file.name)
+            logger.info(f"Deleted uploaded audio chunk: {uploaded_file.name}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error processing audio chunk {chunk_path}: {e}")
+            return None
+
     async def _extract_metadata(self, video_path: str) -> VideoMetadata:
         """Extract metadata from video file"""
         try:
@@ -762,7 +797,9 @@ class VideoProcessor:
             logger.error(f"Failed to extract metadata: {str(e)}", exc_info=True)
             raise VideoProcessingError(f"Failed to extract metadata: {str(e)}")
 
+   
     async def _generate_transcript(self, audio_path: str) -> List[TranscriptSegment]:
+        logger.info(f"DEBUG: Starting transcript generation with audio_path: {audio_path}")
         """Generate transcript from audio file using Gemini with chunking support for long responses"""
         try:
             logger.info(f"Generating transcript for audio {audio_path}")
@@ -787,9 +824,37 @@ class VideoProcessor:
                 # Add exponential backoff retry logic
                 base_delay = 1  # Start with 1 second delay
                 max_retries = 3
-                for attempt in range(max_retries):
+                
+                # Check if pydub is available for audio duration analysis
+                if not PYDUB_AVAILABLE:
+                    logger.error("pydub library is not installed. Cannot process audio duration or split long files. Install with 'pip install pydub'")
+                    raise ImportError("pydub is required for audio processing")
+
+                if not Path(audio_path).exists():
+                    logger.error(f"Audio file not found at path: {audio_path}")
+                    return None
+
+                MAX_CHUNK_DURATION_MS = settings.transcript_generation.max_chunk_duration_minutes * 60 * 1000
+                logger.info(f"Maximum audio chunk duration set to {settings.transcript_generation.max_chunk_duration_minutes} minutes ({MAX_CHUNK_DURATION_MS} ms).")
+
+                try:
+                    audio_segment = await asyncio.to_thread(AudioSegment.from_file, audio_path)
+                    duration_ms = len(audio_segment)
+                    logger.info(f"Audio duration: {duration_ms / 1000:.2f} seconds")
+                except Exception as e:
+                    logger.error(f"Failed to load audio file with pydub: {e}")
+                    return None
+
+                # --- Audio Processing Logic --- 
+                if duration_ms <= MAX_CHUNK_DURATION_MS:
+                    # --- Process shorter audio files (existing logic) --- 
+                    logger.info("Audio duration is within limit, processing as a single file.")
+                    audio_file = None
                     try:
-                        # Get the Gemini model response with chunking support
+                        audio_file = await asyncio.to_thread(genai.upload_file, audio_path, mime_type="audio/wav")
+                        logger.info(f"Successfully uploaded audio file: {audio_path}")
+                        
+                        # Get the Gemini model
                         model = self.model_manager.get_transcription_model_instance()
                         
                         # Create transcription prompt
@@ -805,63 +870,155 @@ class VideoProcessor:
                         Important: The transcription must be complete and cover the entire duration of the audio.
                         """
                         
-                        # Upload audio file
-                        audio_file = genai.upload_file(audio_path, mime_type="audio/wav")
-                        logger.info(f"Successfully uploaded audio file: {audio_path}")
-                        
-                        # Generate initial response
                         initial_response = await asyncio.to_thread(
                             model.generate_content, 
                             contents=[transcription_prompt, audio_file],
-                            request_options={"timeout": 1000}
+                            request_options={"timeout": 1000} # Increased timeout for potentially long audio
                         )
-                        
-                        # Check if response is truncated and handle chunking if needed
+
                         if is_response_truncated(initial_response):
-                            logger.info("Initial transcription response was truncated, using chunking mechanism")
-                            # Use chunking for potentially long responses
+                            logger.info("Initial transcription response was truncated, using chunking mechanism for text response.")
                             raw_text = await handle_chunked_response(
                                 model=model,
                                 original_prompt=transcription_prompt,
                                 first_response=initial_response,
                                 additional_contents=[audio_file],
-                                max_continuation_attempts=5,
-                                is_json=False  # Raw transcript is not JSON
+                                max_continuation_attempts=5
                             )
                         else:
-                            # Response was not truncated, use it directly
                             raw_text = initial_response.text.strip()
-                        
-                        if not raw_text:
-                            raise VideoProcessingError("Received empty transcript from model")
-                        
-                        # Save raw transcript immediately after successful generation
-                        self._save_raw_transcript(Path(audio_path).stem, raw_text)
-                        break  # Success! Break out of retry loop
-                        
+                            logger.info("Transcription complete (single API call, no text truncation).")
                     except Exception as e:
-                        if "429" in str(e) or "Resource has been exhausted" in str(e):
-                            if attempt < max_retries - 1:  # Don't wait on last attempt
-                                wait_time = base_delay * (2 ** attempt)  # Exponential backoff
-                                logger.warning(f"Rate limit hit, waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}")
-                                await asyncio.sleep(wait_time)
-                                continue
-                        raise  # Re-raise if not a rate limit error or out of retries
+                        logger.error(f"Error during single-file audio transcription: {e}")
+                        raw_text = None
+                    finally:
+                        # Cleanup chunk resources
+                        if audio_file:
+                            try:
+                                await asyncio.to_thread(genai.delete_file, audio_file.name)
+                                logger.info(f"Deleted uploaded single audio file: {audio_file.name}")
+                            except Exception as delete_err:
+                                logger.warning(f"Failed to delete uploaded single audio file {audio_file.name}: {delete_err}")
                 else:
-                    raise VideoProcessingError("Failed to transcribe after maximum retries")
-                
+                    # --- Process long audio files via segmentation --- 
+                    logger.info(f"Audio duration exceeds limit ({duration_ms} > {MAX_CHUNK_DURATION_MS} ms). Splitting into chunks.")
+                    num_chunks = math.ceil(duration_ms / MAX_CHUNK_DURATION_MS)
+                    logger.info(f"Splitting audio into {num_chunks} chunks.")
+                    transcript_parts = []
+                    base_filename = Path(audio_path).stem
+                    chunk_temp_dir = self.audio_dir / f"chunks_{base_filename}_{uuid.uuid4()}"
+                    
+                    try:
+                        chunk_temp_dir.mkdir(parents=True, exist_ok=True)
+                        logger.info(f"Created temporary chunk directory: {chunk_temp_dir}")
+
+                        for i in range(num_chunks):
+                            start_ms = i * MAX_CHUNK_DURATION_MS
+                            end_ms = min((i + 1) * MAX_CHUNK_DURATION_MS, duration_ms)
+                            logger.info(f"Processing chunk {i+1}/{num_chunks} ({start_ms/1000:.2f}s to {end_ms/1000:.2f}s)")
+                            
+                            chunk_segment = audio_segment[start_ms:end_ms]
+                            chunk_filename = f"{base_filename}_chunk_{i+1}.wav"
+                            chunk_path = chunk_temp_dir / chunk_filename
+                            uploaded_chunk_file = None
+
+                            try:
+                                # Export chunk
+                                await asyncio.to_thread(chunk_segment.export, chunk_path, format="wav")
+                                logger.info(f"Exported chunk {i+1} to {chunk_path}")
+
+                                # Upload chunk
+                                uploaded_chunk_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
+                                logger.info(f"Uploaded chunk {i+1}: {uploaded_chunk_file.name}")
+
+                                # Generate content for chunk (no continuation needed here)
+                                chunk_text = await self._process_audio_chunk(chunk_path)
+                                
+                                if chunk_text:
+                                    logger.info(f"Received transcript for chunk {i+1} (length: {len(chunk_text)} chars)")
+                                    transcript_parts.append(chunk_text)
+                                else:
+                                    logger.warning(f"Failed to generate transcript for chunk {i+1}")
+
+                            except Exception as chunk_err:
+                                logger.error(f"Error processing chunk {i+1}: {chunk_err}")
+                                # Optionally, decide whether to stop or continue with other chunks
+                                # For now, we log the error and continue
+                                transcript_parts.append(f"[ERROR PROCESSING CHUNK {i+1}]") 
+                            finally:
+                                # Cleanup chunk resources
+                                if uploaded_chunk_file:
+                                    try:
+                                        await asyncio.to_thread(genai.delete_file, uploaded_chunk_file.name)
+                                        logger.info(f"Deleted uploaded chunk file: {uploaded_chunk_file.name}")
+                                    except Exception as delete_err:
+                                        logger.warning(f"Failed to delete uploaded chunk file {uploaded_chunk_file.name}: {delete_err}")
+                                if chunk_path.exists():
+                                    try:
+                                        os.remove(chunk_path)
+                                        logger.info(f"Deleted local chunk file: {chunk_path}")
+                                    except OSError as os_err:
+                                        logger.warning(f"Failed to delete local chunk file {chunk_path}: {os_err}")
+                        
+                        # Combine results from all chunks
+                        raw_text = ' '.join(transcript_parts)
+                        logger.info(f"Combined transcripts from {len(transcript_parts)} chunks. Total length: {len(raw_text)} chars.")
+
+                    except Exception as e:
+                        logger.error(f"Error during audio chunking process: {e}")
+                        raw_text = None # Indicate failure
+                    finally:
+                        # Cleanup temporary directory
+                        if chunk_temp_dir.exists():
+                            try:
+                                shutil.rmtree(chunk_temp_dir)
+                                logger.info(f"Removed temporary chunk directory: {chunk_temp_dir}")
+                            except OSError as rmtree_err:
+                                logger.warning(f"Failed to remove temporary chunk directory {chunk_temp_dir}: {rmtree_err}")
+                # --- End Audio Processing Logic ---
+
+            except yt_dlp.utils.DownloadError as e:
+                logger.error(f"yt-dlp download error during transcript generation (should not happen if audio exists): {e}")
+                return None
             except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg or "Resource has been exhausted" in error_msg:
-                    error_msg = "API rate limit exceeded. Please try again later."
-                logger.error(f"Transcription failed: {error_msg}")
-                raise VideoProcessingError(f"Failed to generate transcript: {error_msg}")
+                logger.error(f"An unexpected error occurred during transcript generation: {e}", exc_info=True)
+                return None
             
+            logger.info(f"DEBUG: After try-except: raw_text exists: {bool(raw_text)}, Length: {len(raw_text) if raw_text else 0}")
+            if raw_text:
+                # Save the final raw transcript from Gemini
+                if audio_path: # Ensure we have a base name
+                    base_filename = Path(audio_path).stem
+                    raw_transcript_filename = f"{base_filename}_gemini_raw.txt"
+                    raw_transcript_path = self.raw_transcript_dir / raw_transcript_filename
+                    logger.info(f"Preparing to save raw transcript with length {len(raw_text)} to {raw_transcript_path}")
+                    logger.info(f"Raw transcript directory exists: {self.raw_transcript_dir.exists()}, is directory: {self.raw_transcript_dir.is_dir()}")
+                    
+                    # Ensure raw transcript directory exists
+                    os.makedirs(self.raw_transcript_dir, exist_ok=True)
+                    
+                    try:
+                        with open(raw_transcript_path, 'w', encoding='utf-8') as f:
+                            f.write(raw_text)
+                        logger.info(f"Successfully saved raw Gemini transcript to {raw_transcript_path}")
+                        
+                        # Verify file was created
+                        if raw_transcript_path.exists():
+                            logger.info(f"Verified: file exists at {raw_transcript_path} with size {raw_transcript_path.stat().st_size} bytes")
+                        else:
+                            logger.error(f"File verification failed - file does not exist at {raw_transcript_path} after writing")
+                    except IOError as io_err:
+                        logger.error(f"Failed to save raw Gemini transcript: {io_err}")
+                else:
+                    logger.warning("Could not save raw Gemini transcript as audio_path was missing.")
+            
+            logger.info(f"DEBUG: Preparing to process raw transcript into segments with {'raw_text available' if raw_text else 'NO raw_text'}")
             # Process raw transcript into segments
             words = raw_text.split()
             words_per_segment = 20
             segments = []
             total_words = len(words)
+            logger.info(f"DEBUG: Processing transcript with {total_words} words")
             segment_duration = 10  # Assume 10 seconds per segment
             
             for i in range(0, total_words, words_per_segment):
@@ -879,8 +1036,8 @@ class VideoProcessor:
             transcript_data = {
                 "language": "en",
                 "segments": [{
-                    "start": segment.start_time,
-                    "duration": segment.end_time - segment.start_time,
+                    "start": segment.start,
+                    "duration": segment.end - segment.start,
                     "text": segment.text
                 } for segment in segments]
             }
@@ -888,12 +1045,16 @@ class VideoProcessor:
                 json.dump(transcript_data, f, indent=2)
             logger.info(f"Saved structured transcript to {transcript_path}")
             
+            logger.info(f"DEBUG: Returning {len(segments)} transcript segments")
             return segments
             
         except Exception as e:
             logger.error(f"Failed to generate transcript: {str(e)}")
+            logger.info(f"DEBUG: Exception in outer try-except: {str(e)}")
             raise VideoProcessingError(f"Failed to generate transcript: {str(e)}")
 
+
+   
     async def _load_raw_transcript(self, video_id: str) -> Optional[str]:
         """Load transcript text from structured transcript file with timestamps"""
         try:
@@ -926,27 +1087,9 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Failed to save raw transcript: {str(e)}")
             raise VideoProcessingError(f"Failed to save raw transcript: {str(e)}")
-
-    def _save_transcript_locally(self, video_id: str, transcript: List[TranscriptSegment]) -> None:
-        """Save transcript to local file"""
-        try:
-            # Save segmented transcript as JSON
-            transcript_path = get_storage_path(f"videos/transcripts/{video_id}.json")
-            with open(transcript_path, 'w', encoding='utf-8') as f:
-                # Convert TranscriptSegment objects to dict, excluding any None values
-                segments = []
-                for segment in transcript:
-                    segment_dict = segment.dict(exclude_none=True)
-                    segments.append(segment_dict)
-                json.dump(segments, f, indent=2)
-            logger.info(f"Saved segmented transcript to {transcript_path}")
             
-        except Exception as e:
-            logger.error(f"Failed to save transcript locally: {str(e)}")
-            raise VideoProcessingError(f"Failed to save transcript: {str(e)}")
-
     async def _extract_frames(self, video: Video) -> List[str]:
-        """Extract frames from video at 5-second intervals"""
+        """Extract frames from video at regular intervals"""
         try:
             logger.info(f"Extracting frames from video {video.id}")
             
@@ -972,15 +1115,14 @@ class VideoProcessor:
                     # Get frame at current time
                     frame = video_clip.get_frame(time)
                     
-                    # Resize frame to 1920x1080
+                    # Convert to PIL Image and resize if needed
                     from PIL import Image
                     import numpy as np
                     frame_pil = Image.fromarray(np.uint8(frame))
-                    frame_pil = frame_pil.resize((1920, 1080), Image.Resampling.LANCZOS)
                     
                     # Save frame as image
                     frame_path = str(frames_dir / f"frame_{time:04d}.jpg")
-                    frame_pil.save(frame_path, quality=95)  # High quality JPEG
+                    frame_pil.save(frame_path, quality=90)
                     
                     frame_paths.append(frame_path)
                     frames_extracted += 1
@@ -1000,7 +1142,25 @@ class VideoProcessor:
                 
         except Exception as e:
             logger.error(f"Failed to extract frames from video {video.id}: {str(e)}", exc_info=True)
-            raise VideoProcessingError(f"Failed to extract frames: {str(e)}")
+            return []
+
+    def _save_transcript_locally(self, video_id: str, transcript: List[TranscriptSegment]) -> None:
+        """Save transcript to local file"""
+        try:
+            # Save segmented transcript as JSON
+            transcript_path = get_storage_path(f"videos/transcripts/{video_id}.json")
+            with open(transcript_path, 'w', encoding='utf-8') as f:
+                # Convert TranscriptSegment objects to dict, excluding any None values
+                segments = []
+                for segment in transcript:
+                    segment_dict = segment.dict(exclude_none=True)
+                    segments.append(segment_dict)
+                json.dump(segments, f, indent=2)
+            logger.info(f"Saved segmented transcript to {transcript_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save transcript locally: {str(e)}")
+            raise VideoProcessingError(f"Failed to save transcript: {str(e)}")
 
     async def _align_frames_with_transcript(self, video: Video, frames: List[str]) -> List[TranscriptSegment]:
         """Align frames with transcript segments."""
@@ -1036,7 +1196,6 @@ class VideoProcessor:
                 logger.info("Analysis JSON saved successfully")
             else:
                 logger.warning("No analysis available to save")
-            
         except Exception as e:
             logger.error(f"Failed to save analysis JSON: {str(e)}")
             raise VideoProcessingError(f"Failed to save analysis JSON: {str(e)}")
@@ -1099,7 +1258,7 @@ class VideoProcessor:
                     frames_pdf_path=str(report_path),
                     summary_json_path=str(initial_analysis_path)
                 )
-                
+            
                 # Update video analysis with frame information
                 if updated_analysis and 'sections' in updated_analysis:
                     video.analysis.frame_analysis = updated_analysis
@@ -1139,7 +1298,7 @@ class VideoProcessor:
                     
                     # Clean the analysis object before saving
                     cleaned_analysis = clean_for_json(updated_analysis)
-                    
+                
                     try:
                         with open(final_output_path, 'w', encoding='utf-8') as f:
                             json.dump(cleaned_analysis, f, indent=2, ensure_ascii=False)
@@ -1160,7 +1319,7 @@ class VideoProcessor:
                             logger.info(f"Saved sanitized final analysis to {final_output_path}")
                         except Exception as fallback_error:
                             logger.error(f"Failed even with sanitization: {str(fallback_error)}")
-                
+            
             except Exception as e:
                 logger.error(f"Failed to analyze frames: {str(e)}", exc_info=True)
                 logger.warning("Continuing with original analysis without frames")

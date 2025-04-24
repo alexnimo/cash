@@ -60,8 +60,9 @@ class ModelSettings(BaseModel):
 
 class ModelConfig(BaseModel):
     video_analysis: ModelSettings
+    frame_analysis: ModelSettings
     transcription: ModelSettings
-    embedding: ModelSettings
+    embedding: Optional[ModelSettings] = None
 
 class VectorStoreConfig(BaseModel):
     type: str
@@ -122,6 +123,9 @@ class NotionConfig(BaseModel):
 class FreeimageSettings(BaseModel):
     api_key: str = Field(default_factory=lambda: os.getenv("FREEIMAGE_API_KEY", ""))
 
+class TranscriptGenerationSettings(BaseModel):
+    max_chunk_duration_minutes: int = Field(default=30)  # Default to 30 minutes
+
 class Settings(BaseModel):
     app_name: str
     model: ModelConfig
@@ -135,6 +139,7 @@ class Settings(BaseModel):
     agents: AgentConfig = Field(default_factory=AgentConfig)
     notion: NotionConfig
     freeimage: FreeimageSettings = Field(default_factory=FreeimageSettings)
+    transcript_generation: TranscriptGenerationSettings = Field(default_factory=TranscriptGenerationSettings)
 
 _settings_instance = None
 

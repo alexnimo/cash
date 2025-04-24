@@ -6,16 +6,21 @@ app_name: "YouTube Video Analysis Platform"
 model:
   video_analysis:
     type: "gemini"
-    name: "gemini-2.0-flash-exp"
+    name: "gemini-2.5-flash-preview-04-17"
     temperature: 0.7
+    thinking_budget: 0
+  frame_analysis:
+    type: "gemini"
+    name: "gemini-2.5-flash-preview-04-17"
+    temperature: 0.7
+    thinking_budget: 65536
   transcription:
     enabled: true
     type: "gemini"
-    name: "gemini-1.5-flash"
-  embedding:
-    type: "gemini"
     name: "gemini-2.0-flash-exp"
-    dimension: 1024
+
+transcript_generation:
+  max_chunk_duration_minutes: 30  # Maximum duration in minutes for each audio chunk
 
 # Vector store settings
 vector_store:
