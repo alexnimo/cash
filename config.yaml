@@ -6,17 +6,21 @@ app_name: "YouTube Video Analysis Platform"
 model:
   video_analysis:
     type: "gemini"
-    name: "gemini-2.0-flash-exp"
-    max_tokens: 1024
+    name: "gemini-2.5-flash-preview-04-17"
     temperature: 0.7
+    thinking_budget: 0
+  frame_analysis:
+    type: "gemini"
+    name: "gemini-2.5-flash-preview-04-17"
+    temperature: 0.7
+    thinking_budget: 65536
   transcription:
     enabled: true
     type: "gemini"
-    name: "gemini-1.5-flash"
-  embedding:
-    type: "gemini"
     name: "gemini-2.0-flash-exp"
-    dimension: 1024
+
+transcript_generation:
+  max_chunk_duration_minutes: 30  # Maximum duration in minutes for each audio chunk
 
 # Vector store settings
 vector_store:
@@ -34,12 +38,7 @@ vector_store:
 
 # Storage settings
 storage:
-  transcript_dir: "./data/transcripts"
-  frames_dir: "./data/frames"
-  summaries_dir: "./data/summaries"
-  temp_dir: "./data/temp"
-  cache_dir: "cache"
-  max_cache_size: 5368709120
+  base_path: "/mnt/d/cash"  # Base storage location for all application data
 
 # API settings
 api:
@@ -89,15 +88,18 @@ notion:
     stock_ticker:
       name: "Stock Ticker"
       type: "title"
-    ta_summary:
-      name: "TA Summary"
-      type: "rich_text"
     key_points:
       name: "Highlights"
       type: "rich_text"
     charts:
       name: "Charts"
       type: "files"
+    update_date:
+      name: "Update Date"
+      type: "date"
+    type:
+      name: "Type"
+      type: "select"
   default_values: {}
 
 # Notion configuration section

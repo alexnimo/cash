@@ -2,6 +2,8 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import unquote
+from functools import lru_cache
+from typing import Optional, Union, List
 
 def normalize_path(path: str) -> str:
     """
@@ -47,3 +49,63 @@ def normalize_path(path: str) -> str:
         path = path.replace('\\', os.sep).replace('/', os.sep)
     
     return path
+
+def get_base_storage_path() -> Path:
+    """
+    Get the configured base storage path from settings.
+    Creates the directory if it doesn't exist.
+    
+    Returns:
+        Path: Path object for the base storage directory
+    """
+    from app.core.config import get_settings
+    
+    base_path = Path(get_settings().storage.base_path)
+    base_path.mkdir(parents=True, exist_ok=True)
+    return base_path
+
+def get_storage_subdir(subdir_name: str) -> Path:
+    """
+    Get a subdirectory within the base storage path.
+    Creates the directory if it doesn't exist.
+    
+    Args:
+        subdir_name (str): Name of the subdirectory
+        
+    Returns:
+        Path: Path object for the subdirectory
+    """
+    base_path = get_base_storage_path()
+    subdir_path = base_path / subdir_name
+    subdir_path.mkdir(parents=True, exist_ok=True)
+    return subdir_path
+
+def get_storage_path(relative_path: str) -> Path:
+    """
+    Get a path within the base storage directory.
+    Creates parent directories if they don't exist.
+    
+    Args:
+        relative_path (str): Path relative to the base storage directory
+        
+    Returns:
+        Path: Absolute path within the storage directory
+    """
+    base_path = get_base_storage_path()
+    full_path = base_path / relative_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    return full_path
+
+def ensure_dir_exists(path: Union[str, Path]) -> Path:
+    """
+    Ensure a directory exists, creating it if necessary.
+    
+    Args:
+        path (Union[str, Path]): Directory path to ensure exists
+        
+    Returns:
+        Path: Path object for the directory
+    """
+    path_obj = Path(path)
+    path_obj.mkdir(parents=True, exist_ok=True)
+    return path_obj

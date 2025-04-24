@@ -51,8 +51,8 @@ class ModelManager:
         self.models = {}
         self.model_configs = {
             settings.model.video_analysis.name: settings.model.video_analysis,
-            settings.model.transcription.name: settings.model.transcription,
-            settings.model.embedding.name: settings.model.embedding
+            settings.model.frame_analysis.name: settings.model.frame_analysis,
+            settings.model.transcription.name: settings.model.transcription
         }
         
         # Initialize quota status
@@ -64,11 +64,11 @@ class ModelManager:
                 'purpose': 'transcription',
                 'last_error_time': None
             },
-            settings.model.embedding.name: {
+            settings.model.frame_analysis.name: {
                 'status': 'available',
                 'error': None,
                 'type': 'gemini-flash',
-                'purpose': 'embedding',
+                'purpose': 'frame_analysis',
                 'last_error_time': None
             }
         }
@@ -140,6 +140,10 @@ class ModelManager:
                 "top_k": 1,
             }
             
+            # Add thinking_budget if configured
+            if hasattr(config, 'thinking_budget'):
+                logger.info(f"Using thinking_budget: {config.thinking_budget} for model {model_name}")
+            
             safety_settings = [
                 {
                     "category": "HARM_CATEGORY_HARASSMENT",
@@ -164,6 +168,9 @@ class ModelManager:
                 generation_config=generation_config,
                 safety_settings=safety_settings
             )
+            
+            # Store thinking_budget in model metadata for later use
+            model._thinking_budget = getattr(config, 'thinking_budget', 0)
             
             self.models[model_name] = model
             logger.info(f"Initialized model {model_name}")
@@ -288,23 +295,76 @@ class ModelManager:
         }
         
         return model, model_config
+        
+    def get_transcription_model_instance(self) -> Any:
+        """Get just the model instance for transcription (without config) for use with chunking"""
+        if not self.settings.model.transcription.enabled:
+            raise ValueError("Transcription is not enabled")
+        
+        # Get config for transcription model
+        transcription_config = self.model_configs[self.settings.model.transcription.name]
+        
+        # Configure the model with specific settings for transcription
+        model = genai.GenerativeModel(
+            model_name=transcription_config.name,
+            generation_config={
+                "temperature": transcription_config.temperature or 0.1,
+                "candidate_count": 1,
+                "top_p": 0.8,
+                "top_k": 40
+            },
+            safety_settings=[
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                }
+            ]
+        )
+        
+        return model
     
-    @trace_gemini_call("generate_embedding")
-    async def get_embedding_model(self) -> Tuple[Any, Dict[str, Any]]:
-        """Get the model for generating embeddings"""
-        self._initialize_model(self.settings.model.embedding.name)
-        model = self.models[self.settings.model.embedding.name]
-        model_config = {
-            "model": self.settings.model.embedding.name,
-            "dimension": self.settings.model.embedding.dimension,
-            "prompt": """
-            Convert the following text into a numerical embedding vector.
-            Output ONLY the space-separated floating point numbers representing the embedding.
-            Do not include any descriptions, speaker labels, or additional formatting.
-            The embedding should capture the semantic meaning of the text for later similarity matching.
-            """
-        }
-        return model, model_config
+    @trace_gemini_call("frame_analysis")
+    async def get_frame_analysis_model(self) -> Any:
+        """Get or initialize frame analysis model"""
+        model_name = self.settings.model.frame_analysis.name
+        
+        try:
+            # Wait for rate limit before configuring
+            if not await self._wait_for_rate_limit(model_name):
+                raise ValueError(f"Rate limit exceeded for {model_name}")
+            
+            # Configure Gemini API
+            genai.configure(api_key=self.settings.api.gemini_api_key)
+            
+            logger.info(f"Initializing frame analysis model: {model_name}")
+            await self._initialize_model(model_name)
+            model = self.models.get(model_name)
+            
+            if not model:
+                raise ValueError(f"Failed to initialize frame analysis model: {model_name}")
+                
+            logger.info(f"Successfully initialized {model_name}")
+            return model
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize {model_name}: {str(e)}", exc_info=True)
+            raise
     
     def _prepare_audio_input(self, audio_path: str) -> Tuple[Any, str]:
         """Prepare audio input for the model"""
@@ -394,14 +454,23 @@ class ModelManager:
             raise TranscriptionError(f"Unexpected error during transcription: {str(e)}")
 
     async def generate_embedding(self, text: str) -> List[float]:
-        """Generate embedding for text using configured embedding model"""
+        """Generate embedding for text using video analysis model as fallback"""
         try:
-            model, config = await self.get_embedding_model()
+            # Use video analysis model instead since embedding model was removed
+            model = await self.get_video_analysis_model()
+            
+            dimension = 1024  # Default dimension
+            prompt = """
+            Convert the following text into a numerical embedding vector.
+            Output ONLY the space-separated floating point numbers representing the embedding.
+            Do not include any descriptions, speaker labels, or additional formatting.
+            The embedding should capture the semantic meaning of the text for later similarity matching.
+            """
             
             @trace_gemini_call("generate_embedding")
             async def embed():
                 return model.generate_content(
-                    config["prompt"] + "\nText: " + text
+                    prompt + "\nText: " + text
                 )
             
             response = await embed()
@@ -413,23 +482,23 @@ class ModelManager:
             embedding_str = response.text.strip()
             embedding = [float(x) for x in embedding_str.split()]
             
-            if len(embedding) != config["dimension"]:
-                raise ValueError(f"Generated embedding dimension {len(embedding)} does not match expected {config['dimension']}")
+            if len(embedding) != dimension:
+                raise ValueError(f"Generated embedding dimension {len(embedding)} does not match expected {dimension}")
                 
             return embedding
             
         except Exception as e:
-            self._update_quota_status(self.settings.model.embedding.name, error=e)
+            self._update_quota_status(self.settings.model.video_analysis.name, error=e)
             raise
 
     def _get_model_purpose(self, model_name):
         """Get the purpose of a model based on its configuration"""
         if model_name == self.settings.model.video_analysis.name:
             return "Video Analysis"
+        elif model_name == self.settings.model.frame_analysis.name:
+            return "Frame Analysis"
         elif model_name == self.settings.model.transcription.name:
             return "Transcription"
-        elif model_name == self.settings.model.embedding.name:
-            return "Embedding"
         return "Unknown"
 
     def _load_audio_file(self, audio_path: str) -> bytes:
