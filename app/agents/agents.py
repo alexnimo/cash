@@ -188,7 +188,7 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
             tracked_stocks_str = ", ".join([str(stock) for stock in tracked_stocks])
             logger.info(f"Retrieved tracked stocks: {tracked_stocks_str}")
 
-            # Process input data
+            # Process input data into string for the prompt
             if isinstance(analysis_data, Path):
                 with open(analysis_data, 'r') as f:
                     market_content = f.read()
@@ -196,7 +196,7 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
                 market_content = analysis_data
             else:
                 market_content = json.dumps(analysis_data, indent=2)
-
+                
             # Get the analysis prompt from the configuration
             analysis_prompt = self.config.get('system_prompt', '')
             
@@ -1608,6 +1608,26 @@ class AgentWorkflow:
                 'notion': None
             }
         
+    def _get_notion_tool(self):
+        """Get a NotionTool instance to use for direct API calls"""
+        # First check if we can get it from the notion agent
+        if 'notion' in self.agents and self.agents['notion'] is not None:
+            if hasattr(self.agents['notion'], 'notion_tool') and self.agents['notion'].notion_tool is not None:
+                return self.agents['notion'].notion_tool
+        
+        # Then check technical agent
+        if 'technical' in self.agents and self.agents['technical'] is not None:
+            if hasattr(self.agents['technical'], 'notion_tool') and self.agents['technical'].notion_tool is not None:
+                return self.agents['technical'].notion_tool
+        
+        # Create a new instance as fallback
+        try:
+            from app.tools.notion_tool_v2 import NotionTool
+            return NotionTool()
+        except Exception as e:
+            logger.error(f"Failed to create NotionTool: {str(e)}")
+            raise ValueError("Could not get or create NotionTool instance")
+    
     async def execute(self, data: Dict) -> Dict:
         """Execute agent workflow with robust error handling"""
         try:
@@ -1622,9 +1642,79 @@ class AgentWorkflow:
                 return {"status": "error", "error": error_msg}
             
             try:
-                # Step 1: Technical Analysis
+                # Step 1: Technical Analysis - using only the final analysis JSON
                 logger.info("Starting technical analysis step")
-                technical_result = await self.agents['technical'].execute(analysis_data)
+                
+                # Get the video ID directly from the analysis_data
+                video_id = analysis_data.get('video_id')
+                
+                # If no video ID found, log error and exit
+                if not video_id:
+                    logger.error("No video_id found in analysis data, cannot locate final analysis JSON")
+                    raise ValueError("Missing video_id in analysis data")
+                
+                # Get path to the final analysis JSON from standard location
+                from app.utils.path_utils import get_storage_subdir
+                summaries_dir = get_storage_subdir("videos/summaries")
+                final_analysis_path = summaries_dir / f"{video_id}_final_analysis.json"
+                logger.info(f"Looking for final analysis at: {final_analysis_path}")
+                
+                # Check if file exists and load it
+                if not final_analysis_path.exists():
+                    logger.error(f"Final analysis JSON file not found at {final_analysis_path}")
+                    raise FileNotFoundError(f"Final analysis JSON file not found for video {video_id}")
+                
+                # Load the final analysis JSON
+                logger.info(f"Found final analysis JSON at {final_analysis_path}")
+                with open(final_analysis_path, 'r') as f:
+                    final_analysis = json.load(f)
+                
+                # Early optimization: Check if any tracked stocks are in the final analysis 
+                # BEFORE initializing the technical analysis agent
+                try:
+                    # Get tracked stocks from Notion directly
+                    from app.tools.notion_tool_v2 import NotionTool
+                    notion_tool = self._get_notion_tool()
+                    tracked_stocks = await notion_tool.get_all_tickers()
+                    
+                    # Ensure tracked_stocks is a proper list of strings
+                    if isinstance(tracked_stocks, str):
+                        tracked_stocks = [stock.strip() for stock in tracked_stocks.split(',') if stock.strip()]
+                    
+                    # Extract all stocks from the report sections
+                    report_stocks = set()
+                    if isinstance(final_analysis, dict) and 'sections' in final_analysis:
+                        for section in final_analysis['sections']:
+                            if 'stocks' in section and isinstance(section['stocks'], list):
+                                for stock in section['stocks']:
+                                    report_stocks.add(stock.upper() if isinstance(stock, str) else str(stock).upper())
+                    
+                    # Normalize tracked stocks to uppercase for case-insensitive comparison
+                    tracked_stocks_set = {str(stock).upper() for stock in tracked_stocks}
+                    
+                    # Check for intersection between tracked stocks and stocks in the report
+                    matching_stocks = tracked_stocks_set.intersection(report_stocks)
+                    
+                    if not matching_stocks:
+                        logger.info("No tracked stocks found in the final analysis report. Skipping technical analysis.")
+                        results["technical_analysis"] = {
+                            "status": "no_tracked_stocks_found",
+                            "message": "None of the tracked stocks were found in the analysis report.",
+                            "stocks_in_report": list(report_stocks),
+                            "tracked_stocks": list(tracked_stocks)
+                        }
+                        results["workflow_completed"] = False
+                        results["early_termination_reason"] = "no_tracked_stocks_found"
+                        return results
+                        
+                    logger.info(f"Found tracked stocks in report: {', '.join(matching_stocks)}")
+                except Exception as e:
+                    # If the early check fails, log and continue with normal flow
+                    logger.warning(f"Early tracked stock check failed: {str(e)}. Continuing with normal flow.")
+                
+                # Execute technical analysis with only the final analysis data
+                technical_result = await self.agents['technical'].execute(final_analysis)
+                
                 analysis_data.update(technical_result)
                 results["technical_analysis"] = {"status": "completed"}
             except Exception as tech_error:

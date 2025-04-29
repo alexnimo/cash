@@ -1396,10 +1396,14 @@ class VideoProcessor:
                         if final_analysis_path.exists():
                             with open(final_analysis_path, 'r') as f:
                                 analysis_data = json.load(f)
+                                # Explicitly add the video ID
+                                analysis_data['video_id'] = video.id
                                 logger.info(f"Loaded analysis data from file for video {video.id}")
                         else:
                             # Use the analysis object directly
                             analysis_data = video.analysis.dict() if hasattr(video.analysis, 'dict') else vars(video.analysis)
+                            # Explicitly add the video ID
+                            analysis_data['video_id'] = video.id
                             logger.info(f"Using in-memory analysis data for video {video.id}")
                     except Exception as data_error:
                         logger.error(f"Error loading analysis data: {str(data_error)}", exc_info=True)
