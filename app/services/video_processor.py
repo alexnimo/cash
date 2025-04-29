@@ -17,7 +17,7 @@ from app.utils.path_utils import get_storage_subdir, get_storage_path
 import google.generativeai as genai
 from google.generativeai.types import GenerateContentResponse
 from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata, VideoAnalysis
-from app.core.settings import get_settings
+from app.core.unified_config import get_config
 from app.services.model_manager import ModelManager
 from app.services.model_config import configure_models
 from app.services.content_analyzer import ContentAnalyzer
@@ -51,7 +51,7 @@ class TranscriptSegment:
         }
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
+config = get_config()
 
 # ANSI color codes for terminal output
 GREEN = "\033[92m"
@@ -289,18 +289,18 @@ class VideoProcessor:
             self.frames_dir = get_storage_subdir("videos/frames")
             
             # Create trace directory if langtrace is enabled
-            if settings.langtrace.enabled:
-                trace_dir = Path(settings.langtrace.trace_dir)
+            if config.langtrace and getattr(config.langtrace, 'enabled', False):
+                trace_dir = Path(config.langtrace.trace_dir)
                 if not trace_dir.is_absolute():
-                    trace_dir = get_storage_path(settings.langtrace.trace_dir)
+                    trace_dir = get_storage_path(config.langtrace.trace_dir)
                     trace_dir.mkdir(parents=True, exist_ok=True)
             
             # Initialize services
-            self.model_manager = ModelManager(settings)
+            self.model_manager = ModelManager(config)
             self.content_analyzer = ContentAnalyzer()
             
             # Initialize semaphore for parallel processing
-            self.semaphore = asyncio.Semaphore(settings.processing.max_parallel_chunks)
+            self.semaphore = asyncio.Semaphore(config.processing.max_parallel_chunks if hasattr(config, 'processing') and hasattr(config.processing, 'max_parallel_chunks') else 3)
             
             # Store reference to global video status
             self.video_status = video_status
@@ -1324,6 +1324,16 @@ class VideoProcessor:
                 logger.error(f"Failed to analyze frames: {str(e)}", exc_info=True)
                 logger.warning("Continuing with original analysis without frames")
             
+            # Agent workflow - integrated into standard processing
+            logger.info(f"Starting integrated agent workflow for video {video.id}")
+            try:
+                # Execute agent workflow as an integral part of the processing pipeline
+                result = await self._trigger_agent_workflow(video)
+                logger.info(f"Agent workflow completed with result: {result}")
+            except Exception as agent_error:
+                logger.error(f"Failed to complete agent workflow: {str(agent_error)}", exc_info=True)
+                # Continue with video processing even if agent workflow fails
+            
             # Update video status
             self.video_status[video.id]["status"] = "completed"
             logger.info(f"Video {video.id} processed successfully")
@@ -1333,3 +1343,84 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Failed to analyze content: {str(e)}")
             raise VideoProcessingError(f"Failed to analyze content: {str(e)}")
+            
+    async def _trigger_agent_workflow(self, video: Video) -> Dict:
+        """
+        Trigger the agent workflow with the video analysis results.
+        
+        Args:
+            video: Video object with analysis data
+            
+        Returns:
+            Dict containing agent processing results
+        """
+        try:
+            # First, make sure we have a valid video object
+            if not video or not hasattr(video, 'id'):
+                logger.error("Invalid video object passed to agent workflow")
+                return {"status": "error", "error": "Invalid video object"}
+                
+            logger.info(f"Preparing to trigger AgentWorkflow for video {video.id}")
+            
+            # Safely import AgentWorkflow from agents module
+            try:
+                from app.agents.agents import AgentWorkflow
+            except ImportError as e:
+                logger.error(f"Failed to import AgentWorkflow: {str(e)}")
+                return {"status": "error", "error": f"Failed to import AgentWorkflow: {str(e)}"}
+            
+            # Initialize AgentWorkflow - configuration loading is handled internally
+            try:
+                workflow = AgentWorkflow()
+                logger.info("AgentWorkflow initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize AgentWorkflow: {str(e)}", exc_info=True)
+                return {"status": "error", "error": f"Failed to initialize AgentWorkflow: {str(e)}"}
+            
+            # Process the video analysis
+            try:
+                # Prepare the data in the format expected by the AgentWorkflow
+                if hasattr(video, 'analysis') and video.analysis:
+                    # Load the final analysis and prepare it for AgentWorkflow
+                    logger.info(f"Preparing analysis data for video {video.id}")
+                    
+                    # Get the raw analysis data either from the file or the object
+                    analysis_data = {}
+                    
+                    try:
+                        # Try to get from JSON file first
+                        storage_base = config.storage.base_path if hasattr(config, 'storage') and hasattr(config.storage, 'base_path') else '.'
+                        summaries_dir = Path(storage_base) / 'videos' / 'summaries'
+                        final_analysis_path = summaries_dir / f"{video.id}_final_analysis.json"
+                        
+                        if final_analysis_path.exists():
+                            with open(final_analysis_path, 'r') as f:
+                                analysis_data = json.load(f)
+                                # Explicitly add the video ID
+                                analysis_data['video_id'] = video.id
+                                logger.info(f"Loaded analysis data from file for video {video.id}")
+                        else:
+                            # Use the analysis object directly
+                            analysis_data = video.analysis.dict() if hasattr(video.analysis, 'dict') else vars(video.analysis)
+                            # Explicitly add the video ID
+                            analysis_data['video_id'] = video.id
+                            logger.info(f"Using in-memory analysis data for video {video.id}")
+                    except Exception as data_error:
+                        logger.error(f"Error loading analysis data: {str(data_error)}", exc_info=True)
+                        analysis_data = {"video_id": video.id, "error": "Failed to load analysis data"}
+                        
+                    # Execute the workflow
+                    logger.info(f"Executing agent workflow for video {video.id}")
+                    results = await workflow.execute(analysis_data)
+                    logger.info(f"Agent workflow completed for video: {video.id}")
+                    return results
+                else:
+                    logger.error(f"No analysis data available for video {video.id}")
+                    return {"status": "error", "error": "No analysis data available"}
+            except Exception as e:
+                logger.error(f"Error in agent workflow execution for video {video.id}: {str(e)}", exc_info=True)
+                return {"status": "error", "error": f"Error in workflow execution: {str(e)}"}
+                
+        except Exception as e:
+            logger.error(f"Unexpected error in agent workflow for video: {str(e)}", exc_info=True)
+            return {"status": "error", "error": str(e)}

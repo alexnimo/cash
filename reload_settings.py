@@ -2,6 +2,8 @@
 Utility script to reload settings from config.yaml file.
 Run this script after making changes to config.yaml to apply the changes
 without having to restart the entire application.
+
+This script uses the unified configuration system to reload all settings.
 """
 import os
 import sys
@@ -21,14 +23,15 @@ if __name__ == "__main__":
     try:
         print("Reloading settings from config.yaml...")
         
-        # Import the reload_settings function
-        from app.core.settings import reload_settings
+        # Import the unified configuration functions
+        from app.core.unified_config import reload_config, get_config
         from app.utils.path_utils import ensure_proper_path
         from pathlib import Path
         import sys
         
-        # Reload the settings
-        settings = reload_settings()
+        # Reload the configuration
+        reload_config()
+        config = get_config()
         
         # Get project root for making absolute paths
         project_root = Path(__file__).parent.absolute()
@@ -66,8 +69,11 @@ if __name__ == "__main__":
         else:
             print("Running in Windows environment")
         
-        print("\nSettings reloaded successfully!")
-        print("You may need to restart any components that have already loaded the old settings.")
+        print(f"Settings reloaded successfully.")
+        print(f"Model: {getattr(config.model.video_analysis, 'name', 'Not configured')}")
+        print(f"Processing: {getattr(config.processing, 'max_parallel_chunks', 'Not configured')} parallel chunks")
+        print(f"Vector store: {getattr(config.vector_store, 'provider', 'Not configured')}")
+        print(f"Agents enabled: {getattr(config.agents, 'enabled', False)}")
         
     except Exception as e:
         print(f"Error reloading settings: {str(e)}")

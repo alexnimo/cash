@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 import datetime
 import google.generativeai as genai
-from app.core.settings import get_settings
+from app.core.unified_config import get_config
 from app.services.model_config import configure_models
 from app.utils.rate_limiter import RateLimiter
 from app.utils.langtrace_utils import (
@@ -20,7 +20,7 @@ from datetime import timedelta
 from llama_index.llms.gemini import Gemini
 from llama_index.llms.openai import OpenAI
 
-settings = get_settings()
+config = get_config()
 logger = logging.getLogger(__name__)
 
 # Initialize LangTrace at module level
@@ -46,35 +46,50 @@ def encode_audio_to_base64(audio_path: str) -> str:
         return base64.b64encode(audio_file.read()).decode('utf-8')
 
 class ModelManager:
-    def __init__(self, settings):
-        self.settings = settings
+    def __init__(self, config):
+        self.config = config
         self.models = {}
-        self.model_configs = {
-            settings.model.video_analysis.name: settings.model.video_analysis,
-            settings.model.frame_analysis.name: settings.model.frame_analysis,
-            settings.model.transcription.name: settings.model.transcription
-        }
+        self.model_configs = {}
+        
+        # Extract model configurations if they exist
+        if hasattr(self.config, 'model'):
+            if hasattr(self.config.model, 'video_analysis'):
+                self.model_configs[self.config.model.video_analysis.name] = self.config.model.video_analysis
+            if hasattr(self.config.model, 'frame_analysis'):
+                self.model_configs[self.config.model.frame_analysis.name] = self.config.model.frame_analysis
+            if hasattr(self.config.model, 'transcription'):
+                self.model_configs[self.config.model.transcription.name] = self.config.model.transcription
         
         # Initialize quota status
-        self._quota_status = {
-            settings.model.transcription.name: {
+        self._quota_status = {}
+        
+        # Set up quota status for transcription model if it exists
+        if hasattr(self.config, 'model') and hasattr(self.config.model, 'transcription'):
+            self._quota_status[self.config.model.transcription.name] = {
                 'status': 'available',
                 'error': None,
                 'type': 'gemini-flash',
                 'purpose': 'transcription',
                 'last_error_time': None
-            },
-            settings.model.frame_analysis.name: {
+            }
+            
+        # Set up quota status for frame analysis model if it exists
+        if hasattr(self.config, 'model') and hasattr(self.config.model, 'frame_analysis'):
+            self._quota_status[self.config.model.frame_analysis.name] = {
                 'status': 'available',
                 'error': None,
                 'type': 'gemini-flash',
                 'purpose': 'frame_analysis',
                 'last_error_time': None
             }
-        }
         
         # Initialize rate limiter with configured RPM
-        rpm = settings.api.gemini_rpm_override or settings.api.gemini_rpm
+        rpm = None
+        if hasattr(self.config, 'api'):
+            rpm = getattr(self.config.api, 'gemini_rpm_override', None) or getattr(self.config.api, 'gemini_rpm', 10)
+        else:
+            rpm = 10  # Default to 10 RPM if not configured
+            
         self.rate_limiter = RateLimiter(
             max_requests=rpm,
             period=timedelta(minutes=1),
@@ -342,7 +357,8 @@ class ModelManager:
     @trace_gemini_call("frame_analysis")
     async def get_frame_analysis_model(self) -> Any:
         """Get or initialize frame analysis model"""
-        model_name = self.settings.model.frame_analysis.name
+        # Use the config attribute instead of settings
+        model_name = self.config.model.frame_analysis.name if hasattr(self.config, 'model') and hasattr(self.config.model, 'frame_analysis') else 'gemini-2.5-flash-preview-04-17'
         
         try:
             # Wait for rate limit before configuring
@@ -350,7 +366,8 @@ class ModelManager:
                 raise ValueError(f"Rate limit exceeded for {model_name}")
             
             # Configure Gemini API
-            genai.configure(api_key=self.settings.api.gemini_api_key)
+            api_key = self.config.api.gemini_api_key if hasattr(self.config, 'api') and hasattr(self.config.api, 'gemini_api_key') else os.getenv('GEMINI_API_KEY')
+            genai.configure(api_key=api_key)
             
             logger.info(f"Initializing frame analysis model: {model_name}")
             await self._initialize_model(model_name)

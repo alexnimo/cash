@@ -1079,26 +1079,35 @@ class NotionTool(BaseTool):
         # Initialize Notion client
         self.notion = AsyncClient(auth=self.api_key)
         
-        # Load properties config
+        # Load properties directly from config.yaml
         try:
-            settings = get_settings()
-            config_path = getattr(settings.notion, 'config_path', 'app/config/notion_config.yaml') 
-            # Add more detailed logging for debugging
-            logger.info(f"Using Notion config path: {config_path}")
+            import yaml
+            from pathlib import Path
             
-            # Check if file exists before trying to open it
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config = yaml.safe_load(f)
-                    self.properties = config.get('properties', {})
-                    logger.info(f"Loaded properties from config: {list(self.properties.keys())}")
-            else:
-                logger.warning(f"Config file not found at path: {config_path}. Using default properties.")
+            # Find config.yaml (3 parent directories up from this file)
+            config_path = Path(__file__).parents[2] / 'config.yaml'
+            logger.info(f"Loading Notion properties from: {config_path}")
+            
+            if not config_path.exists():
+                logger.warning(f"Config file not found at {config_path}")
                 raise FileNotFoundError(f"Config file not found: {config_path}")
+            
+            # Load the raw YAML
+            with open(config_path, 'r') as f:
+                raw_config = yaml.safe_load(f)
+            
+            # Check if notion section and properties exist
+            if 'notion' in raw_config and 'properties' in raw_config['notion']:
+                self.properties = raw_config['notion']['properties']
+                logger.info(f"Loaded Notion properties from config.yaml: {list(self.properties.keys())}")
+            else:
+                logger.warning("No notion.properties found in config.yaml, falling back to default properties")
+                # Don't raise an error - let the fallback logic handle it
                 
         except Exception as e:
-            logger.error(f"Error loading Notion config: {e}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
+            logger.error(f"Error loading Notion config: {str(e)}")
+            logger.info("Falling back to default Notion properties")
+            
             # Fallback to default properties
             self.properties = {
                 "stock_ticker": {"name": "Stock Ticker", "type": "title"},
@@ -1108,7 +1117,18 @@ class NotionTool(BaseTool):
                 "date": {"name": "Date", "type": "date"},
                 "source": {"name": "Source", "type": "select"}
             }
-            logger.info("Using default properties due to config loading error")
+            
+            # Try to merge with any properties that might exist in config
+            try:
+                if hasattr(config, 'notion') and hasattr(config.notion, 'properties'):
+                    for key, value in config.notion.properties.items():
+                        if key not in self.properties:
+                            self.properties[key] = value
+                    logger.info(f"Merged default properties with config: {list(self.properties.keys())}")
+            except Exception:
+                pass
+                
+            logger.info("Using default properties with fallback configuration")
         
         # Call parent init without passing metadata - we'll implement the method instead
         super().__init__()

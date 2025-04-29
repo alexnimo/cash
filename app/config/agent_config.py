@@ -1,7 +1,31 @@
-"""Agent configuration module"""
+"""DEPRECATED: This file has been replaced by configuration in config.yaml
+
+The agent configurations have been moved to the main config.yaml file.
+Please use the get_config_loader() function from app.config.config_loader to access settings.
+
+This file is kept only for reference and backward compatibility.
+"""
+
 from typing import Dict, Any
 
-AGENT_CONFIG: Dict[str, Any] = {
+# Forward compatibility - import from the new location
+from app.config.config_loader import get_config_loader
+
+# Get configuration from the new system
+_config = get_config_loader()
+AGENT_CONFIG = _config.get('agents', default={})
+
+# Add a warning when this module is imported
+import warnings
+warnings.warn(
+    "agent_config.py is deprecated and will be removed in a future version. "
+    "Please use app.config.config_loader.get_config_loader() instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+# Legacy configuration structure - this is here for reference only
+_LEGACY_CONFIG: Dict[str, Any] = {
     'debug_dir': 'debug',  # Directory for agent debug outputs
     
     'embedding': {
