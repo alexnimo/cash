@@ -23,8 +23,6 @@ from llama_index.vector_stores.pinecone import PineconeVectorStore
 from llama_index.core.prompts import PromptTemplate
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
-import agentops
-from agentops import track_agent
 
 try:
     from langchain.agents import create_react_agent
@@ -33,15 +31,17 @@ try:
 except ImportError as e:
     logging.error(f"Error importing langchain: {str(e)}")
 
-agentops_api_key = os.getenv("AGENTOPS_API_KEY")
+
 
 from app.tools import notion_tool_v2
 from app.tools.notion_tool_v2 import NotionTool
-from app.config.agent_config import AGENT_CONFIG
+from app.core.unified_config import get_config
 from app.llm import LLMFactory
 
 logger = logging.getLogger(__name__)
-agentops.init(agentops_api_key)
+
+# Load configuration
+config = get_config()
 
 def normalize_path(path: str) -> str:
     """
@@ -84,10 +84,25 @@ def parse_date(date_str: str) -> datetime.datetime:
 class BaseFinanceAgent(ReActAgent):
     """Base class for finance-specific agents"""
     def __init__(self, tools: List[BaseTool], llm: Any, memory: ChatMemoryBuffer, config: Dict[str, Any]):
+        # Set up debug directory from config
+        # Fix: Use positional argument for default value in dict.get
+        debug_dir = config.get('debug_dir', 'debug')
+        self.debug_dir = Path(debug_dir)
+        self.debug_dir.mkdir(exist_ok=True)
+        
+        # Store the configuration
+        self.config = config
+        
+        # Get system prompt from config
+        # Fix: Use positional argument for default value in dict.get
+        system_prompt = config.get('system_prompt', '')
+        
+        # Create chat formatter with system prompt
         chat_formatter = ReActChatFormatter(
-            system_header=config.get('system_prompt', '')
+            system_header=system_prompt
         )
 
+        # Initialize the base ReActAgent
         super().__init__(
             tools=tools,
             llm=llm,
@@ -99,80 +114,6 @@ class BaseFinanceAgent(ReActAgent):
 
 class TechnicalAnalysisAgent(BaseFinanceAgent):
     """Agent for technical analysis tasks"""
-    ANALYSIS_PROMPT = """Act as an Expert Technical Analysis Consolidator. Transform fragmented stock commentary into institutional-grade technical summaries following these precise instructions:
-
-        **Core Mission**
-        Create comprehensive technical profiles for tracked stocks by synthesizing all relevant data points across the provided analysis materials.
-
-        **Critical Processing Rules**
-        1. STRICT FILTERING:
-           - Process ONLY tracked stocks that have actual data in the input report
-           - EXCLUDE tracked stocks that have no meaningful data or mentions
-           - EXCLUDE all non-tracked stocks entirely
-        2. DATA PRESERVATION:
-           - Maintain ALL visual references (frame_paths)
-           - Preserve chronological sequence of events
-           - Keep ALL relevant technical indicators and patterns
-
-        **Technical Analysis Protocol**
-        For each valid stock mention:
-        1. Data Extraction:
-           - Price Action: Historical movements, key reversals, trend structure
-           - Volume Analysis: Trading activity, liquidity patterns, accumulation/distribution
-           - Technical Indicators: Moving averages, RSI, MACD, etc.
-           - Chart Patterns: Support/resistance, trend lines, formations
-           
-        2. Risk Assessment:
-           - Volatility Profile: Historical and expected volatility levels
-           - Risk Factors: Technical weaknesses, overhead resistance, dilution risks
-           - Liquidity Considerations: Trading volume, market depth
-           
-        3. Opportunity Analysis:
-           - Technical Setup Quality: Pattern completeness and reliability
-           - Entry/Exit Levels: Key price points for trade management
-           - Catalyst Timeline: Upcoming events that could impact technicals
-
-        **Synthesis Requirements**
-        Construct comprehensive technical profiles with:
-        1. Price Architecture:
-           - Key support/resistance levels
-           - Trend structure and momentum
-           - Price pattern formations
-           
-        2. Risk/Reward Matrix:
-           - Potential reward targets
-           - Clear risk levels
-           - Position sizing considerations
-           
-        3. Action Framework:
-           - Technical triggers for entry
-           - Risk management levels
-           - Target price objectives
-
-        **Output Format**
-        Deliver a strict JSON response:
-        {
-            "Date": "<current_date>",
-            "Channel name": "<channel_name>",
-            "sections": [
-                {
-                    "topic": "Technical Profile: <STOCK>",
-                    "stocks": ["<STOCK>"],
-                    "frame_paths": ["relevant_chart_paths"],
-                    "source": "Composite Analysis",
-                    "summary": "[Technical Context] + [Setup Quality] + [Risk/Reward Profile]",
-                    "key_points": [
-                        "Pattern: <identified_technical_pattern>",
-                        "Setup: <current_technical_setup>",
-                        "Risk: <key_risk_levels>",
-                        "Target: <price_objectives>",
-                        "Trigger: <entry_signals>"
-                    ]
-                }
-            ]
-        }
-
-        IMPORTANT: Only include sections for tracked stocks that have actual technical analysis data in the input. Do not create empty or placeholder sections."""
 
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
         # Store LLM before initializing base agent
@@ -181,20 +122,50 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
         # Initialize base agent
         super().__init__(tools=tools, llm=llm, memory=memory, config=config)
         
-        self.config = config
-        self.debug_dir = Path(AGENT_CONFIG['debug_dir'])
-        self.debug_dir.mkdir(exist_ok=True)
+        # Initialize RAG agent with configuration from config.yaml
+        import yaml
         
-        # Initialize RAG agent
+        # Try to get RAG config from several sources
+        try:
+            # First check if RAG config is in the current config
+            rag_config = {}
+            if isinstance(self.config, dict) and 'rag' in self.config:
+                rag_config = self.config['rag']
+                logger.info("Using RAG config from provided config dictionary")
+            else:
+                # Load config directly from config.yaml
+                config_path = Path(__file__).parents[2] / 'config.yaml'
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        raw_config = yaml.safe_load(f)
+                    
+                    # RAG config could be at root level or under agents
+                    if 'rag' in raw_config:
+                        rag_config = raw_config['rag']
+                        logger.info("Loaded RAG config from root level in config.yaml")
+                    elif 'agents' in raw_config and 'rag' in raw_config['agents']:
+                        rag_config = raw_config['agents']['rag']
+                        logger.info("Loaded RAG config from agents section in config.yaml")
+        except Exception as e:
+            logger.warning(f"Error loading RAG config: {e}, using empty config")
+            rag_config = {}
+            
+        # Ensure debug_dir is set
+        if 'debug_dir' not in rag_config:
+            rag_config['debug_dir'] = 'debug'
+            
+        # Initialize the RAG agent
         self.rag_agent = RAGAgent(
-            config=AGENT_CONFIG.get('rag', {}),
+            config=rag_config,
             llm_service=llm
         )
         
         # Initialize Notion tool for tracked stocks
-        self.notion_tool = next(t for t in tools if isinstance(t, NotionTool))
-        
-        config['system_prompt'] = self.ANALYSIS_PROMPT
+        try:
+            self.notion_tool = next(t for t in tools if isinstance(t, NotionTool))
+        except StopIteration:
+            logger.warning("No NotionTool found in provided tools")
+            self.notion_tool = None
 
     async def execute(self, analysis_data: Union[Dict, str, Path]) -> Dict:
         """Execute technical analysis workflow"""
@@ -226,8 +197,11 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
             else:
                 market_content = json.dumps(analysis_data, indent=2)
 
-            # Create analysis prompt
-            prompt = f"""{self.ANALYSIS_PROMPT}
+            # Get the analysis prompt from the configuration
+            analysis_prompt = self.config.get('system_prompt', '')
+            
+            # Create analysis prompt with data
+            prompt = f"""{analysis_prompt}
 
             Input Analysis Data:
             {market_content}
@@ -299,18 +273,24 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
 class MarketAnalysisAgent(BaseFinanceAgent):
     """Agent for market analysis tasks"""
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
+        # Store the configuration
         self.config = config
-        self.debug_dir = Path(AGENT_CONFIG['debug_dir'])
+        
+        # Set up debug directory from config
+        debug_dir = config.get('debug_dir', 'debug')
+        self.debug_dir = Path(debug_dir)
         self.debug_dir.mkdir(exist_ok=True)
         
         # Initialize RAG agent
         self.rag_agent = RAGAgent(
-            config=AGENT_CONFIG.get('rag', {}),
+            config=config.get('rag', {}),
             llm_service=llm
         )
         
         # Initialize Notion tool for tracked stocks
-        self.notion_tool = next(t for t in tools if isinstance(t, NotionTool))
+        self.notion_tool = next((t for t in tools if isinstance(t, NotionTool)), None)
+        if not self.notion_tool:
+            logger.warning("NotionTool not found in provided tools")
         
         # Initialize base agent
         super().__init__(tools=tools, llm=llm, memory=memory, config=config)
@@ -466,14 +446,13 @@ class MarketAnalysisAgent(BaseFinanceAgent):
             logger.error(f"Error generating consolidated report: {str(e)}")
             raise
 
-@track_agent(name="RAGagent")
+
 class RAGAgent:
     """Agent for RAG operations"""
-    
     def __init__(self, config: Dict[str, Any], llm_service: Any):
         self.config = config
         self.llm_service = llm_service
-        self.debug_dir = Path(AGENT_CONFIG['debug_dir'])
+        self.debug_dir = Path(config.get('debug_dir', 'debug'))
         self.debug_dir.mkdir(exist_ok=True)
         self.similarity_threshold = config.get('similarity_threshold', 0.85)
         
@@ -481,143 +460,43 @@ class RAGAgent:
         self._init_vector_store()
         
         # Initialize Notion agent for updates
+        # Import yaml here to avoid circular imports
+        import yaml
+        
+        try:
+            # Try to get notion config from the provided config dictionary first
+            notion_config = {}
+            if isinstance(self.config, dict) and 'notion' in self.config:
+                notion_config = self.config['notion']
+                logger.info("Using notion config from provided config dictionary")
+            else:
+                # Load config directly from config.yaml
+                config_path = Path(__file__).parents[2] / 'config.yaml'
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        raw_config = yaml.safe_load(f)
+                    if 'agents' in raw_config and 'notion' in raw_config['agents']:
+                        notion_config = raw_config['agents']['notion']
+                        logger.info("Loaded notion config from config.yaml")
+            
+            # Set default debug_dir if not specified
+            if 'debug_dir' not in notion_config:
+                notion_config['debug_dir'] = 'debug'
+                
+        except Exception as e:
+            logger.warning(f"Error loading notion config: {e}, using empty config")
+            notion_config = {'debug_dir': 'debug'}
+            
+        # Initialize the NotionAgent
         self.notion_agent = NotionAgent(
             tools=[NotionTool()],
             llm=llm_service,
             memory=ChatMemoryBuffer.from_defaults(),
-            config=AGENT_CONFIG.get('notion', {})
+            config=notion_config
         )
 
-        system_prompt_lines = [
-            "You are an expert Stock Analysis Data Manager. Your task is to intelligently manage stock analysis data in a vector database by deciding whether to UPDATE, ADD NEW, or take NO ACTION on stock analysis sections.",
-            "",
-            "ANALYSIS CONTEXT:",
-            "For each section, you will receive:",
-            "1. NEW SECTION:",
-            "   - Text content combining topic, stocks, summary, and key points",
-            "   - Metadata including date, channel_name, stocks, and other attributes",
-            "2. SIMILAR EXISTING SECTION (if found):",
-            "   - Text content and metadata from vector database",
-            "3. Similarity Score between the sections",
-            "",
-            "DECISION GUIDELINES:",
-            "",
-            "1. ADD NEW (Similarity Score < 0.85):",
-            "   - When no similar section exists",
-            "   - When similarity score indicates substantially different content",
-            "   Justification required: Adding new analysis on stocks from channel_name dated date",
-            "",
-            "2. UPDATE (Similarity Score >= 0.85):",
-            "   Requirements:",
-            "   a) New section's date is more recent than existing section",
-            "   b) Content provides meaningful updates:",
-            "      - New key points",
-            "      - Updated price targets",
-            "      - New technical patterns",
-            "      - Additional frame images",
-            "   Justification required: Updating analysis on stocks with new data from channel_name dated date",
-            "",
-            "3. NO ACTION:",
-            "   Conditions:",
-            "   - Similar content exists with more recent date",
-            "   - New content doesn't provide significant updates",
-            "   - New content is older than existing analysis",
-            "   Justification required: No update needed - specific reason",
-            "",
-            "EVALUATION CRITERIA:",
-            "1. Date Comparison:",
-            "   - Compare dates between new and existing sections",
-            "   - Consider market relevance timeframes",
-            "",
-            "2. Content Value Assessment:",
-            "   - Technical analysis updates",
-            "   - Price level changes",
-            "   - New market catalysts",
-            "   - Risk factor updates",
-            "   - Trading volume patterns",
-            "",
-            "3. Quality Factors:",
-            "   - Comprehensiveness of analysis",
-            "   - Specificity of price targets",
-            "   - Supporting evidence (charts, data)",
-            "   - Technical indicator analysis",
-            "",
-            "Your output should be a clear decision (ADD, UPDATE, or NO ACTION) with a concise justification referencing the specific criteria used."
-        ]
-        
-        # Join the lines with newlines to create the complete system prompt
-        system_prompt_main = "\n".join(system_prompt_lines)
-        
-        # Update the system prompt in the config with all parts
-        self.config['system_prompt'] = system_prompt_main
-        
-        # Initialize vector store and embedding model
-        self._init_vector_store()
-        
-        # Initialize Notion agent for updates
-        self.notion_agent = NotionAgent(
-            tools=[NotionTool()],
-            llm=llm_service,
-            memory=ChatMemoryBuffer.from_defaults(),
-            config=AGENT_CONFIG.get('notion', {})
-        )
-
-        self.system_prompt = system_prompt_main
-
-        self.system_prompt = """You are an expert Stock Analysis Data Manager. Your task is to intelligently manage stock analysis data in a vector database by deciding whether to UPDATE, ADD NEW, or take NO ACTION on stock analysis sections.
-
-ANALYSIS CONTEXT:
-For each section, you will receive:
-1. NEW SECTION:
-   - Text content combining topic, stocks, summary, and key points
-   - Metadata including date, channel_name, stocks, and other attributes
-2. SIMILAR EXISTING SECTION (if found):
-   - Text content and metadata from vector database
-3. Similarity Score between the sections
-
-DECISION GUIDELINES:
-
-1. ADD NEW (Similarity Score < 0.85):
-   - When no similar section exists
-   - When similarity score indicates substantially different content
-   Justification required: Adding new analysis on stocks from channel_name dated date
-
-2. UPDATE (Similarity Score >= 0.85):
-   Requirements:
-   a) New section's date is more recent than existing section
-   b) Content provides meaningful updates:
-      - New key points
-      - Updated price targets
-      - New technical patterns
-      - Additional frame images
-   Justification required: Updating analysis on stocks with new data from channel_name dated date
-
-3. NO ACTION:
-   Conditions:
-   - Similar content exists with more recent date
-   - New content doesn't provide significant updates
-   - New content is older than existing analysis
-   Justification required: No update needed - specific reason
-
-EVALUATION CRITERIA:
-1. Date Comparison:
-   - Compare dates between new and existing sections
-   - Consider market relevance timeframes
-   
-2. Content Value Assessment:
-   - Technical analysis updates
-   - Price level changes
-   - New market catalysts
-   - Risk factor updates
-   - Trading volume patterns
-   
-3. Quality Factors:
-   - Comprehensiveness of analysis
-   - Specificity of price targets
-   - Supporting evidence (charts, data)
-   - Technical indicator analysis
-
-Your output should be a clear decision (ADD, UPDATE, or NO ACTION) with a concise justification referencing the specific criteria used."""
+        # Use the system prompt from configuration
+        self.system_prompt = self.config.get('system_prompt', '')
 
     def _init_vector_store(self):
         from app.tools.pinecone_tool_v2 import PineconeAdvancedToolSpec
@@ -1104,14 +983,17 @@ Your output should be a clear decision (ADD, UPDATE, or NO ACTION) with a concis
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise
 
-@track_agent(name="NotionAgent")
+
 class NotionAgent(BaseFinanceAgent):
     """Agent for updating Notion database with technical analysis data"""
-    
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
         """Initialize Notion agent"""
         # Store the original config
         self.config = config.copy()
+        
+        # Create debug directory
+        self.debug_dir = Path(self.config.get('debug_dir', 'debug'))
+        self.debug_dir.mkdir(exist_ok=True)
         
         # Set explicit ReAct mode configuration 
         self.config['response_mode'] = 'REACT'
@@ -1553,58 +1435,244 @@ Process the following technical analysis data:
             }
 
 class AgentWorkflow:
-    """Agent workflow class"""
+    """Agent workflow class for coordinating multiple agents"""
     
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize agent workflow"""
-        self.config = config
+    def __init__(self, config: Dict[str, Any] = None):
+        """Initialize agent workflow with configuration
+        
+        If config is None, loads configuration directly from config.yaml
+        """
+        if config is None:
+            self.config = self._load_config_from_yaml()
+            logger.info("Loaded configuration directly from config.yaml")
+        else:
+            self.config = config
+            logger.info("Using provided configuration dictionary")
+            
+        logger.info(f"AgentWorkflow initialized with config keys: {list(self.config.keys()) if isinstance(self.config, dict) else 'Not a dict'}")
         self.agents = self._initialize_agents()
         
-    def _initialize_agents(self) -> Dict[str, Any]:
-        """Initialize agents"""
-        llm_factory = LLMFactory()
-        return {
-            'technical': TechnicalAnalysisAgent(
-                tools=[NotionTool()],
-                llm=llm_factory.create_llm(self.config.get('technical', {}).get('llm', {})),
-                memory=ChatMemoryBuffer.from_defaults(),
-                config=self.config.get('technical', {})
-            ),
-            'market': MarketAnalysisAgent(
-                tools=[NotionTool()],
-                llm=llm_factory.create_llm(self.config.get('market', {}).get('llm', {})),
-                memory=ChatMemoryBuffer.from_defaults(),
-                config=self.config.get('market', {})
-            ),
-            'rag': RAGAgent(
-                config=self.config.get('rag', {}),
-                llm_service=llm_factory.create_llm(self.config.get('rag', {}).get('llm', {}))
-            ),
-            'notion': NotionAgent(
-                tools=[NotionTool()],
-                llm=llm_factory.create_llm(self.config.get('notion', {}).get('llm', {})),
-                memory=ChatMemoryBuffer.from_defaults(),
-                config=self.config.get('notion', {})
-            )
-        }
-        
-    async def execute(self, data: Dict) -> Dict:
-        """Execute agent workflow"""
+    def _load_config_from_yaml(self) -> Dict[str, Any]:
+        """Load configuration directly from config.yaml"""
         try:
-            # Step 1: Technical Analysis
-            technical_result = await self.agents['technical'].execute(data)
+            import yaml
+            from pathlib import Path
             
-            # Step 2: Market Analysis
-            market_result = await self.agents['market'].execute(technical_result)
+            # Find the config.yaml file (3 levels up from the module)
+            config_path = Path(__file__).parents[2] / 'config.yaml'
+            logger.info(f"Loading config from: {config_path}")
             
-            # Step 3: RAG Processing
-            rag_result = await self.agents['rag'].execute(market_result)
+            with open(config_path, 'r') as f:
+                raw_config = yaml.safe_load(f)
             
-            # Step 4: Notion Update
-            final_result = await self.agents['notion'].execute(rag_result)
+            # Prepare config structure for AgentWorkflow
+            agents_config = {}
             
-            return final_result
+            # Add root-level LLM config if it exists
+            if 'llm' in raw_config:
+                agents_config['llm'] = raw_config['llm']
+                logger.info("Added global LLM config")
+            
+            # Add agent-specific configs
+            if 'agents' in raw_config:
+                # Technical, market, and notion agents
+                for agent_type in ['technical_analysis', 'market_analysis', 'notion']:
+                    key = agent_type.replace('_analysis', '')
+                    if agent_type in raw_config['agents']:
+                        agents_config[key] = raw_config['agents'][agent_type]
+                        logger.info(f"Added config for {agent_type}")
+            
+            # Handle RAG config which might be at root level
+            if 'rag' in raw_config:
+                agents_config['rag'] = raw_config['rag']
+                logger.info("Added RAG config from root level")
+            elif 'agents' in raw_config and 'rag' in raw_config['agents']:
+                agents_config['rag'] = raw_config['agents']['rag']
+                logger.info("Added RAG config from agents level")
+            
+            return agents_config
             
         except Exception as e:
-            logger.error(f"Error in agent workflow execution: {str(e)}")
-            raise
+            logger.error(f"Error loading configuration from YAML: {str(e)}")
+            raise ValueError(f"Failed to load configuration: {str(e)}")
+        
+    def _initialize_agents(self) -> Dict[str, Any]:
+        """Initialize all required agents with shared tools and memory"""
+        try:
+            # Create shared objects
+            shared_memory = ChatMemoryBuffer.from_defaults()
+            
+            # Create a single LLM factory to use for all agents
+            llm_factory = LLMFactory()
+            
+            # Check if configuration is valid
+            if not isinstance(self.config, dict):
+                raise ValueError("Invalid configuration format: expected dictionary")
+                
+            # Import unified config for loading global settings if needed
+            from app.core.unified_config import get_config
+            root_config = get_config()
+                
+            # Initialize shared components
+            shared_tools = [NotionTool()]
+            logger.info(f"Created shared tools: {[type(t).__name__ for t in shared_tools]}")
+            
+            # Get agent-specific configs
+            technical_config = self.config.get('technical', {}) 
+            market_config = self.config.get('market', {}) 
+            rag_config = self.config.get('rag', {}) 
+            notion_config = self.config.get('notion', {})
+            
+            # Function to get agent-specific LLM with proper fallbacks
+            def get_agent_llm(agent_name, agent_config):
+                # Try agent-specific LLM config first
+                if 'llm' in agent_config:
+                    llm_config = agent_config['llm']
+                    logger.info(f"Using {agent_name}-specific LLM config: {llm_config}")
+                # Fall back to global agents.llm config
+                elif 'llm' in self.config:
+                    llm_config = self.config['llm']
+                    logger.info(f"Using shared agents.llm config for {agent_name}")
+                # Fall back to root llm config
+                elif hasattr(root_config, 'llm'):
+                    llm_config = root_config.llm
+                    if hasattr(llm_config, 'dict'):
+                        llm_config = llm_config.dict()
+                    logger.info(f"Using global root.llm config for {agent_name}: {llm_config}")
+                else:
+                    raise ValueError(f"No LLM configuration found for {agent_name}")
+                    
+                return llm_factory.create_llm(llm_config)
+                
+            # Set debug dir if not specified (only required property)
+            for config_name, config in [
+                ('technical', technical_config),
+                ('market', market_config),
+                ('notion', notion_config)
+            ]:
+                if 'debug_dir' not in config:
+                    config['debug_dir'] = 'debug'
+                
+            logger.info("Creating agents with dedicated configurations...")
+            
+            # Create a RAG agent with its own LLM config
+            rag_llm = get_agent_llm('rag', rag_config)
+            rag_agent = RAGAgent(
+                config=rag_config,
+                llm_service=rag_llm
+            )
+            
+            # Create technical analysis agent with its own LLM config
+            technical_llm = get_agent_llm('technical', technical_config)
+            technical_agent = TechnicalAnalysisAgent(
+                tools=shared_tools,
+                llm=technical_llm,
+                memory=shared_memory,
+                config=technical_config
+            )
+            
+            # Create market analysis agent with its own LLM config
+            market_llm = get_agent_llm('market', market_config)
+            market_agent = MarketAnalysisAgent(
+                tools=shared_tools,
+                llm=market_llm,
+                memory=shared_memory,
+                config=market_config
+            )
+            
+            # Create notion agent with its own LLM config
+            notion_llm = get_agent_llm('notion', notion_config)
+            notion_agent = NotionAgent(
+                tools=shared_tools,
+                llm=notion_llm,
+                memory=shared_memory,
+                config=notion_config
+            )
+            
+            # Return the agent dictionary
+            return {
+                'technical': technical_agent,
+                'market': market_agent,
+                'rag': rag_agent,
+                'notion': notion_agent
+            }
+            
+        except Exception as e:
+            logger.error(f"Error initializing agents: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return minimum set of agents to avoid KeyError during execute
+            return {
+                'technical': None,
+                'market': None,
+                'rag': None,
+                'notion': None
+            }
+        
+    async def execute(self, data: Dict) -> Dict:
+        """Execute agent workflow with robust error handling"""
+        try:
+            # Track analysis stages and results
+            analysis_data = data.copy() if isinstance(data, dict) else {}
+            results = {"status": "success"}
+            
+            # Check if agents were successfully initialized
+            if not all(self.agents.values()):
+                error_msg = "Agent workflow cannot execute because one or more agents failed to initialize"
+                logger.error(error_msg)
+                return {"status": "error", "error": error_msg}
+            
+            try:
+                # Step 1: Technical Analysis
+                logger.info("Starting technical analysis step")
+                technical_result = await self.agents['technical'].execute(analysis_data)
+                analysis_data.update(technical_result)
+                results["technical_analysis"] = {"status": "completed"}
+            except Exception as tech_error:
+                error_msg = f"Technical analysis failed: {str(tech_error)}"
+                logger.error(error_msg)
+                results["technical_analysis"] = {"status": "error", "error": str(tech_error)}
+                return {"status": "error", "error": error_msg}
+            
+            try:
+                # Step 2: Market Analysis
+                logger.info("Starting market analysis step")
+                market_result = await self.agents['market'].execute(analysis_data)
+                analysis_data.update(market_result)
+                results["market_analysis"] = {"status": "completed"}
+            except Exception as market_error:
+                error_msg = f"Market analysis failed: {str(market_error)}"
+                logger.error(error_msg)
+                results["market_analysis"] = {"status": "error", "error": str(market_error)}
+                return {"status": "error", "error": error_msg}
+            
+            try:
+                # Step 3: RAG Processing
+                logger.info("Starting RAG processing step")
+                rag_result = await self.agents['rag'].execute(analysis_data)
+                analysis_data.update(rag_result)
+                results["rag_processing"] = {"status": "completed"}
+            except Exception as rag_error:
+                error_msg = f"RAG processing failed: {str(rag_error)}"
+                logger.error(error_msg)
+                results["rag_processing"] = {"status": "error", "error": str(rag_error)}
+                return {"status": "error", "error": error_msg}
+            
+            try:
+                # Step 4: Notion Update
+                logger.info("Starting Notion update step")
+                notion_result = await self.agents['notion'].execute(analysis_data)
+                results["notion_update"] = {"status": "completed"}
+                results.update(notion_result)
+            except Exception as notion_error:
+                error_msg = f"Notion update failed: {str(notion_error)}"
+                logger.error(error_msg)
+                results["notion_update"] = {"status": "error", "error": str(notion_error)}
+                return {"status": "error", "error": error_msg}
+            
+            return results
+        except Exception as e:
+            logger.error(f"Unexpected error in agent workflow execution: {str(e)}")
+            return {
+                "status": "error",
+                "error": f"Unexpected workflow error: {str(e)}"
+            }

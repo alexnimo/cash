@@ -402,6 +402,9 @@ class ContentAnalyzer:
     @trace_llm_call("analyze_frames_and_update_summary")
     async def _analyze_frames_and_update_summary(self, video: Video, frames_pdf_path: str, summary_json_path: str) -> Dict[str, Any]:
         """Analyze frames from PDF and update summary with best frames for each section."""
+        # Initialize summary with default empty structure to avoid UnboundLocalError
+        summary = {"sections": [], "video_id": video.id, "frame_analysis_status": "error"}
+        
         try:
             # Get the model
             model = await self._get_frame_analysis_model()
@@ -427,7 +430,7 @@ class ContentAnalyzer:
                 
                 # Create parts with all PDF files
                 prompt = f"""
-                You are an expert financial content analyzer. 
+                You are an expert financial chart analyzer. 
                 Your task is to analyze frames from a financial video that have been split into {len(pdf_files)} PDF chunks.
                 Each chunk contains a portion of the frames from the video.
                 
@@ -444,7 +447,7 @@ class ContentAnalyzer:
                 
                 Return: list[Section]
                 
-                Instructions for frame analysis:
+                Instructions for frame analysis and chart detection:
                 1. For each frame in ALL PDF chunks:
                    - Look for stock chart graphs and analyze:
                      * Stock tickers visible in the chart
@@ -453,10 +456,11 @@ class ContentAnalyzer:
                      * Visual quality and readability
                    - Record the full path of the frame from the PDF metadata
                    - Assign a quality score (0-10) based on clarity and information
-                   - Pick only one best frame for each section based on the sections above
-                   - You can pick one additional frame for eacch stock in case you can cleary recognize
-                    Time frame. In most cases time frames can be recognized by the chart title (w , weekly, m, monthly) or the timeframe label.
+                   - Pick only one best frame with the highest assigned score for each section based on the sections above
+                   - You can pick only one additional frame for eacch stock in case you can cleary recognize
+                    Time frame. In most cases time frames can be recognized by the chart title (w/weekly, m/monthly, d/daily) or the timeframe label.
                    - Do not add irrelevant images that doesn't show a stock chart
+                   - Discard any frames that do not show a stock chart (such as frames with text, logos, or other non-chart content)
             
                 2. For each section in the summary:
                    - If the section discusses specific stocks:
@@ -465,6 +469,7 @@ class ContentAnalyzer:
                      * Add the FULL FRAME PATHS to the section's frame_paths list
                    - If no specific stocks discussed or there is no visible chart, leave frame_paths as empty list
                    - Do not add any general frames which do not show a stock chart
+                   - There cannot be more than 3 frames per section (daily, monthly, weekly)
             
                 3. CRITICAL: You MUST:
                    - Use DOUBLE QUOTES for all strings and property names

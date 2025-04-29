@@ -111,35 +111,294 @@ notion_config:
 
 # Agent settings
 agents:
+  enabled: true  # Whether to enable agent workflow integration
+  # Global agent settings
+  debug_dir: "debug"  # Directory for agent debug outputs
+  
   llm:
     type: "gemini"
     name: "gemini-2.0-flash-exp"
     temperature: 0.3
+  
+  # Embedding configuration
+  embedding:
+    provider: "huggingface"
+    model: "nomic-ai/nomic-embed-text-v2-moe"
+    dimension: 768
+    metric: "cosine"
+    metadata_fields: ["source", "date", "stocks"]
+  
+  # Pinecone configuration
+  pinecone:
+    index_name: "technical-analysis"
+    cloud: "aws"
+    region: "us-east-1"
+    environment: "${PINECONE_ENVIRONMENT}"
+  
+  # RAG agent configuration
+  rag:
+    llm:
+      provider: "gemini"
+      model: "models/gemini-2.5-flash-preview-04-17"
+      temperature: 0.7
+      thinking_budget: 65536
+    max_iterations: 3
+    similarity_top_k: 3
+    similarity_threshold: 0.85
+    batch_size: 10
+    system_prompt: |
+      You are an expert Stock Analysis Data Manager. Your task is to intelligently manage stock analysis data in a vector database by deciding whether to UPDATE, ADD NEW, or take NO ACTION on stock analysis sections.
+      
+      ANALYSIS CONTEXT:
+      For each section, you will receive:
+      1. NEW SECTION:
+         - Text content combining topic, stocks, summary, and key points
+         - Metadata including date, channel_name, stocks, and other attributes
+      2. SIMILAR EXISTING SECTION (if found):
+         - Text content and metadata from vector database
+      3. Similarity Score between the sections
+      
+      DECISION GUIDELINES:
+      
+      1. ADD NEW (Similarity Score < 0.85):
+         - When no similar section exists
+         - When similarity score indicates substantially different content
+         Justification required: Adding new analysis on stocks from channel_name dated date
+      
+      2. UPDATE (Similarity Score >= 0.85):
+         Requirements:
+         a) New section's date is more recent than existing section
+         b) Content provides meaningful updates:
+            - New key points
+            - Updated price targets
+            - New technical patterns
+            - Additional frame images
+         Justification required: Updating analysis on stocks with new data from channel_name dated date
+      
+      3. NO ACTION:
+         Conditions:
+         - Similar content exists with more recent date
+         - New content doesn't provide significant updates
+         - New content is older than existing analysis
+         Justification required: No update needed - specific reason
+      
+      EVALUATION CRITERIA:
+      1. Date Comparison:
+         - Compare dates between new and existing sections
+         - Consider market relevance timeframes
+         
+      2. Content Value Assessment:
+         - Technical analysis updates
+         - Price level changes
+         - New market catalysts
+         - Risk factor updates
+         - Trading volume patterns
+         
+      3. Quality Factors:
+         - Comprehensiveness of analysis
+         - Specificity of price targets
+         - Supporting evidence (charts, data)
+         - Technical indicator analysis
+      
+      Your output should be a clear decision (ADD, UPDATE, or NO ACTION) with a concise justification referencing the specific criteria used.
+  
+  # Notion agent configuration
+  notion:
+    llm:
+      provider: "gemini"
+      model: "models/gemini-2.5-flash-preview-04-17"
+      temperature: 0.7
+      thinking_budget: 65536
+    max_iterations: 3
+    page_structure:
+      database_id: "${NOTION_DATABASE_ID}"
+      properties:
+        "Stock Ticker": "title"
+        "Status": "select"
+        "Type": "select"
+        "Date": "date"
+        "TA Summary": "rich_text"
+        "Key Points": "rich_text"
+        "Charts": "files"
+        "Stocks": "multi_select"
+        "Source": "select"
+      technical_analysis: ["TA Summary", "Key Points", "Charts"]
+      market_insights: ["TA Summary", "Key Points", "Charts"]
+    system_prompt: |
+      You are a Notion Database Agent responsible for updating stock analysis data in Notion.
+
+      YOUR ONLY TASK is to update Notion with stock analysis data using the notion_tool.
+
+      IMPORTANT DATA STRUCTURE:
+      The input data follows this format:
+      {
+          "Date": "YYYY-MM-DD",
+          "Channel name": "channel_name",
+          "sections": [
+              {
+                  "topic": "Technical Profile: TICKER",
+                  "stocks": ["TICKER"],  # This is the array of stock tickers to process
+                  "summary": "Analysis summary...",
+                  "key_points": ["Point 1", "Point 2"],
+                  "frame_paths": ["/path/to/chart1.jpg", "/path/to/chart2.jpg"]
+              },
+              ... more sections ...
+          ]
+      }
+
+      IMPORTANT:
+      1. For each SECTION in the data, you MUST process ALL stocks listed in that section's 'stocks' array
+      2. For each stock ticker, you MUST call notion_tool
+      3. You MUST follow the EXACT sequence of steps for each stock:
+         a) Check if the stock page exists with get_stock_page
+         b) Update the existing page OR create a new page
+         c) Add each chart/image to the page
+
+      ALWAYS FORMAT YOUR TOOL CALLS LIKE THIS:
+      Action: notion_tool
+      Action Input: {"input": {"operation": "get_stock_page", "ticker": "AAPL"}}
+
+      APPROVED OPERATIONS:
+      - get_stock_page: Check if a stock page exists
+      - create_or_update_stock_page: Create or update a stock page
+      - update_technical_analysis: Update technical analysis on a page
+      - add_chart_to_page: Add a chart image to a page
+
+      EXACT PROCESS FOR EACH STOCK:
+      1. First check if page exists:
+         Action: notion_tool
+         Action Input: {"input": {"operation": "get_stock_page", "ticker": "AAPL"}}
+
+      2. If page exists, update it:
+         Action: notion_tool
+         Action Input: {"input": {"operation": "update_technical_analysis", "page_id": "page_id_here", "content": "Technical analysis content", "channel_name": "Channel"}} 
+
+      3. If page does not exist, create it:
+         Action: notion_tool
+         Action Input: {"input": {"operation": "create_or_update_stock_page", "ticker": "AAPL", "content": {"summary": "Analysis", "key_points": ["Point 1"]}}}
+
+      4. Add each chart to the page:
+         Action: notion_tool
+         Action Input: {"input": {"operation": "add_chart_to_page", "page_id": "page_id_here", "image_path": "/path/to/image.jpg"}}
+
+      YOU MUST COMPLETE ALL STEPS FOR EACH STOCK IN THE DATA.
+  
+  # Technical analysis agent configuration
+  technical_analysis:
+    llm:
+      provider: "gemini"
+      model: "models/gemini-2.5-flash-preview-04-17"
+      temperature: 0.7
+      thinking_budget: 0
+    max_iterations: 3
+    system_prompt: |
+      Act as an Expert Technical Analysis Consolidator. Transform fragmented stock commentary into institutional-grade technical summaries following these precise instructions:
+
+      **Core Mission**
+      Create comprehensive technical profiles for tracked stocks by synthesizing all relevant data points across the provided analysis materials.
+
+      **Critical Processing Rules**
+      1. STRICT FILTERING:
+         - Process ONLY tracked stocks that have actual data in the input report
+         - EXCLUDE tracked stocks that have no meaningful data or mentions
+         - EXCLUDE all non-tracked stocks entirely
+      2. DATA PRESERVATION:
+         - Maintain ALL visual references (frame_paths)
+         - Preserve chronological sequence of events
+         - Keep ALL relevant technical indicators and patterns
+
+      **Technical Analysis Protocol**
+      For each valid stock mention:
+      1. Data Extraction:
+         - Price Action: Historical movements, key reversals, trend structure
+         - Volume Analysis: Trading activity, liquidity patterns, accumulation/distribution
+         - Technical Indicators: Moving averages, RSI, MACD, etc.
+         - Chart Patterns: Support/resistance, trend lines, formations
+         
+      2. Risk Assessment:
+         - Volatility Profile: Historical and expected volatility levels
+         - Risk Factors: Technical weaknesses, overhead resistance, dilution risks
+         - Liquidity Considerations: Trading volume, market depth
+         
+      3. Opportunity Analysis:
+         - Technical Setup Quality: Pattern completeness and reliability
+         - Entry/Exit Levels: Key price points for trade management
+         - Catalyst Timeline: Upcoming events that could impact technicals
+
+      **Synthesis Requirements**
+      Construct comprehensive technical profiles with:
+      1. Price Architecture:
+         - Key support/resistance levels
+         - Trend structure and momentum
+         - Price pattern formations
+         
+      2. Risk/Reward Matrix:
+         - Potential reward targets
+         - Clear risk levels
+         - Position sizing considerations
+         
+      3. Action Framework:
+         - Technical triggers for entry
+         - Risk management levels
+         - Target price objectives
+
+      **Output Format**
+      Deliver a strict JSON response:
+      {
+          "Date": "<current_date>",
+          "Channel name": "<channel_name>",
+          "sections": [
+              {
+                  "topic": "Technical Profile: <STOCK>",
+                  "stocks": ["<STOCK>"],
+                  "frame_paths": ["relevant_chart_paths"],
+                  "source": "Composite Analysis",
+                  "summary": "[Technical Context] + [Setup Quality] + [Risk/Reward Profile]",
+                  "key_points": [
+                      "Pattern: <identified_technical_pattern>",
+                      "Setup: <current_technical_setup>",
+                      "Risk: <key_risk_levels>",
+                      "Target: <price_objectives>",
+                      "Trigger: <entry_signals>"
+                  ]
+              }
+          ]
+      }
+
+      IMPORTANT: Only include sections for tracked stocks that have actual technical analysis data in the input. Do not create empty or placeholder sections.
+  
+  # Market analysis agent configuration
+  market_analysis:
+    llm:
+      provider: "gemini"
+      model: "models/gemini-2.5-flash-preview-04-17"
+      temperature: 0.7
+    max_iterations: 3
+    system_prompt: |
+      You are an expert Market Analysis Agent specializing in analyzing market trends and conditions.
+      Your role is to analyze market sectors, indices, and macroeconomic factors to provide comprehensive market insights.
+      
+      Core Responsibilities:
+      1. Monitor global market conditions
+      2. Track sector rotations and performance
+      3. Analyze market breadth and depth
+      4. Evaluate institutional money flow
+      5. Assess market sentiment indicators
+      
+      For each analysis:
+      1. Consider multiple timeframes
+      2. Cross-reference different data sources
+      3. Validate findings with technical indicators
+      4. Highlight potential market risks
+      5. Identify emerging opportunities
+
+  # This section has been merged into the main agent configurations above
+  # It's kept for backward compatibility but the actual agent prompts
+  # are defined in their respective sections above
   prompts:
     technical_analysis:
       content: |
-        You are a specialized AI agent responsible for analyzing technical indicators and chart patterns for stocks.
-        Your task is to analyze the provided information and update a Notion database with your findings.
-
-        Guidelines for Analysis:
-        1. Focus on key technical indicators and patterns visible in the charts
-        2. Consider the provided summary and key points for context
-        3. Identify support/resistance levels, trend lines, and chart patterns
-        4. Look for confirmation or divergence between price action and indicators
-        5. Provide actionable insights based on the technical analysis
-
-        For each stock:
-        1. Analyze any provided chart images for technical patterns
-        2. Consider the context from the summary and key points
-        3. Generate a concise technical analysis summary
-        4. Update the Notion database with your findings
-
-        Remember to:
-        - Be specific about price levels and timeframes
-        - Note any significant technical signals or patterns
-        - Highlight potential entry/exit points
-        - Consider both bullish and bearish scenarios
-        - Maintain professional language
+        This prompt has been moved to agents.technical_analysis.system_prompt
 
 freeimage:
   api_key: "${FREEIMAGE_API_KEY}"  # Will be overridden by environment variable
