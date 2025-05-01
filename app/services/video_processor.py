@@ -417,6 +417,22 @@ class VideoProcessor:
                 },
                 "url": str(video.url)
             }
+            
+            # Validate transcription configuration before downloading anything
+            try:
+                logger.info("Validating transcription configuration before proceeding")
+                if not hasattr(self, 'model_manager'):
+                    self.model_manager = ModelManager(config)
+                
+                # Test if the transcription model is properly configured by attempting to access it
+                # This will raise an error if configuration is invalid
+                await self.model_manager.get_transcription_model()
+                logger.info("Transcription configuration validated successfully")
+            except Exception as config_error:
+                logger.error(f"Transcription configuration validation failed: {str(config_error)}")
+                self.video_status[video.id]["status"] = "failed"
+                self.video_status[video.id]["error"] = f"Transcription configuration error: {str(config_error)}"
+                raise VideoProcessingError(f"Transcription configuration is invalid: {str(config_error)}")
 
             # Download video
             logger.info(f"Processing video {video.id}")
@@ -469,9 +485,26 @@ class VideoProcessor:
                     video.transcript = await self._generate_transcript(audio_path)
                     self.video_status[video.id]["progress"]["transcribing"] = 100
                     logger.info("Transcript generated successfully")
+                    
+                    # Check if transcript was successfully generated
+                    if not video.transcript or len(video.transcript) == 0:
+                        logger.error(f"No transcript was generated for video {video.id}")
+                        self.video_status[video.id]["status"] = "failed"
+                        self.video_status[video.id]["error"] = "Transcript generation failed"
+                        raise VideoProcessingError("No transcript was generated - cannot proceed with analysis")
+                        
                 except Exception as e:
                     logger.error(f"Failed to generate transcript: {str(e)}")
+                    self.video_status[video.id]["status"] = "failed"
+                    self.video_status[video.id]["error"] = f"Failed to generate transcript: {str(e)}"
                     raise VideoProcessingError(f"Failed to generate transcript: {str(e)}")
+                    
+            # Verify we have a valid transcript before proceeding
+            if not video.transcript or len(video.transcript) == 0:
+                logger.error(f"No valid transcript available for video {video.id}")
+                self.video_status[video.id]["status"] = "failed"
+                self.video_status[video.id]["error"] = "No valid transcript available"
+                raise VideoProcessingError("No valid transcript available - cannot proceed with analysis")
                     
             # Extract frames
             logger.info(f"Extracting frames from video {video.id}")
@@ -725,7 +758,7 @@ class VideoProcessor:
         try:
             # Initialize model manager if needed
             if not hasattr(self, 'model_manager'):
-                self.model_manager = ModelManager(settings)
+                self.model_manager = ModelManager(config)
                 
             # Upload the audio file
             uploaded_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
@@ -834,8 +867,8 @@ class VideoProcessor:
                     logger.error(f"Audio file not found at path: {audio_path}")
                     return None
 
-                MAX_CHUNK_DURATION_MS = settings.transcript_generation.max_chunk_duration_minutes * 60 * 1000
-                logger.info(f"Maximum audio chunk duration set to {settings.transcript_generation.max_chunk_duration_minutes} minutes ({MAX_CHUNK_DURATION_MS} ms).")
+                MAX_CHUNK_DURATION_MS = config.get('transcript_generation', 'max_chunk_duration_minutes', default=30) * 60 * 1000
+                logger.info(f"Maximum audio chunk duration set to {config.get('transcript_generation', 'max_chunk_duration_minutes', default=30)} minutes ({MAX_CHUNK_DURATION_MS} ms).")
 
                 try:
                     audio_segment = await asyncio.to_thread(AudioSegment.from_file, audio_path)

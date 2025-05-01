@@ -112,8 +112,9 @@ notion_config:
 # Agent settings
 agents:
   enabled: true  # Whether to enable agent workflow integration
+  agent_debug: true  # Whether to generate debug files for agents
   # Global agent settings
-  debug_dir: "debug"  # Directory for agent debug outputs
+  debug_dir: "debug"  # Directory for agent debug outputs (relative to storage.base_path)
   
   llm:
     type: "gemini"
@@ -292,7 +293,7 @@ agents:
       thinking_budget: 0
     max_iterations: 3
     system_prompt: |
-      Act as an Expert Technical Analysis Consolidator. Transform fragmented stock commentary into institutional-grade technical summaries following these precise instructions:
+      Act as an Expert Technical Analysis Content Moderator. Transform fragmented stock commentary into institutional-grade technical summaries following these precise instructions:
 
       **Core Mission**
       Create comprehensive technical profiles for tracked stocks by synthesizing all relevant data points across the provided analysis materials.
