@@ -635,7 +635,7 @@ class ContentAnalyzer:
             3. When analyzing stock-specific sections:
                - CRITICAL: Create a SEPARATE section for EACH individual stock ticker/name
                - Each "stock analysis" section MUST have EXACTLY ONE stock in the 'stocks' array
-               - For example, if AAPL, MSFT, and AMZN are discussed sequentially, create THREE separate sections. Each section for a different stock.
+               - For example, if AAPL, MSFT, and AMZN are discussed sequentially, create THREE separate sections
                - Include specific times when each individual stock is discussed
                - Note any market data or metrics mentioned for that specific stock
                - Highlight significant trends or patterns for that specific stock
@@ -644,55 +644,7 @@ class ContentAnalyzer:
                - Focus on actionable trading insights and market analysis
                - Be specific and detailed in your summaries
                - Use proper stock ticker symbols
-               - DO NOT combine multiple stocks in a single section              
-             5. Edge Case - Comparison Analysis:
-               - If the topic is a comparison between multiple stocks or indexes, set the topic as "comparison analysis"
-               - In this case, and ONLY in this case, the 'stocks' array can contain more than one stock or index
-               - This use case can be used if you can clearly identify the discussion is a comparison between multiple stocks or indexes on a single chart.
-               - This applies to comparisons like USD/BTC, S&P/BTC, or multiple stocks compared directly
-            
-            Examples:
-            Valid Stock Analysis Section:
-            {{
-                "topic": "stock analysis",
-                "stocks": ["AAPL"],
-                "start_time": 120.5,
-                "end_time": 240.0,
-                "summary": "Discussion about Apple's recent earnings.",
-                "key_points": ["Q2 earnings exceeded expectations", "Stock up 5% after hours"],
-                "overall_summary": "Positive outlook for Apple based on earnings."
-            }}
-            
-            Invalid Stock Analysis Sections (WRONG - multiple stocks in one section):
-            {{
-                "topic": "stock analysis",
-                "stocks": ["AAPL", "MSFT"],
-                "start_time": 120.5,
-                "end_time": 240.0,
-                "summary": "Discussion about Apple and Microsoft.",
-                "key_points": ["Apple earnings", "Microsoft cloud growth"],
-                "overall_summary": "Tech stocks analysis."
-            }}
-            {{
-                "topic": "stock analysis",
-                "stocks": ["AAPL", "MSFT", "AMZN"],
-                "start_time": 120.5,
-                "end_time": 240.0,
-                "summary": "Discussion about multiple tech stocks.",
-                "key_points": ["Apple earnings", "Microsoft cloud", "Amazon retail"],
-                "overall_summary": "Tech stocks analysis."
-            }}
-            
-            Valid Comparison Analysis Section (edge case with multiple stocks/indexes on a single chart):
-            {{
-                "topic": "comparison analysis",
-                "stocks": ["USD", "BTC"],
-                "start_time": 300.0,
-                "end_time": 420.0,
-                "summary": "Comparison of USD vs BTC value trends.",
-                "key_points": ["BTC outperformed USD by 20% this month", "Correlation analysis provided"],
-                "overall_summary": "BTC showing strength against USD in current market."
-            }}
+               - DO NOT combine multiple stocks in a single section
             
             IMPORTANT: 
             - Your response must be a valid JSON array matching the schema above.
