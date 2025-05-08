@@ -282,7 +282,11 @@ agents:
          Action: notion_tool
          Action Input: {"input": {"operation": "add_chart_to_page", "page_id": "page_id_here", "image_path": "/path/to/image.jpg"}}
 
+      5. Make sure to update the date property with the updated date when you update the stock ticker property.
+      
       YOU MUST COMPLETE ALL STEPS FOR EACH STOCK IN THE DATA.
+      
+
   
   # Technical analysis agent configuration
   technical_analysis:

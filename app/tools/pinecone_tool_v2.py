@@ -87,12 +87,35 @@ class PineconeAdvancedToolSpec(BaseTool):
         from llama_index.core.ingestion import IngestionPipeline
         from llama_index.core.node_parser import SemanticSplitterNodeParser
         from llama_index.vector_stores.pinecone import PineconeVectorStore
+        import importlib
 
-        # Initialize vector store
-        vector_store = PineconeVectorStore(
-            pinecone_index=self.index,
-            embedding_model=self.embed_model
-        )
+        # Check if llama_index.vector_stores.pinecone has get_pinecone_client
+        pinecone_vectorstore_module = importlib.import_module('llama_index.vector_stores.pinecone')
+        if hasattr(pinecone_vectorstore_module, 'get_pinecone_client'):
+            # For newer versions of LlamaIndex that need a custom init for Pinecone
+            try:
+                # Initialize vector store
+                vector_store = PineconeVectorStore(
+                    index_name=self.index_name,
+                    environment=self.pinecone_config.get('environment', None),
+                    metadata_filters=True,
+                    pinecone_kwargs={"api_key": self.pc.api_key},
+                    embedding_model=self.embed_model
+                )
+                logger.info("Initialized PineconeVectorStore with newer method")
+            except Exception as e:
+                logger.warning(f"Could not initialize PineconeVectorStore with newer method: {e}")
+                # Try the original approach
+                vector_store = PineconeVectorStore(
+                    pinecone_index=self.index,
+                    embedding_model=self.embed_model
+                )
+        else:
+            # Initialize vector store with original approach
+            vector_store = PineconeVectorStore(
+                pinecone_index=self.index,
+                embedding_model=self.embed_model
+            )
         
         # Initialize pipeline with node parser and vector store
         return IngestionPipeline(
@@ -118,7 +141,27 @@ class PineconeAdvancedToolSpec(BaseTool):
             # Check if index exists
             try:
                 index_description = self.pc.describe_index(self.index_name)
-                current_dimension = index_description.dimension
+                
+                # Handle dimension access based on SDK version
+                try:
+                    # Try accessing as an attribute (newer SDK)
+                    current_dimension = getattr(index_description, "dimension", None)
+                except (AttributeError, TypeError):
+                    # Try accessing as a dictionary (older SDK)
+                    current_dimension = index_description.get("dimension") if isinstance(index_description, dict) else None
+                    
+                # If we still couldn't get dimension, try alternate attribute names
+                if current_dimension is None:
+                    # Try other possible attribute names
+                    for attr in ["dimension", "dimensions", "vector_dimension", "vector_dimensions"]:
+                        current_dimension = getattr(index_description, attr, None)
+                        if current_dimension is not None:
+                            break
+                
+                if current_dimension is None:
+                    logger.warning(f"Could not determine dimension of existing index {self.index_name}")
+                    # Continue with creation to be safe
+                    raise ValueError(f"Could not determine dimension of existing index {self.index_name}")
                 
                 if current_dimension == target_dimension:
                     logger.info(f"Using existing index {self.index_name} with correct dimension {target_dimension}")
@@ -164,8 +207,33 @@ class PineconeAdvancedToolSpec(BaseTool):
         """Check if an index is ready and available"""
         try:
             description = self.pc.describe_index(index_name)
-            return description.status.ready
-        except Exception:
+            
+            # Try to check ready status in different ways based on SDK version
+            # 1. Try status.ready (newer SDK)
+            try:
+                if hasattr(description, 'status') and hasattr(description.status, 'ready'):
+                    return description.status.ready
+            except (AttributeError, TypeError):
+                pass
+                
+            # 2. Try direct ready attribute
+            if hasattr(description, 'ready'):
+                return description.ready
+                
+            # 3. Try dictionary access (older SDK)
+            if isinstance(description, dict):
+                if 'status' in description and 'ready' in description['status']:
+                    return description['status']['ready']
+                if 'ready' in description:
+                    return description['ready']
+            
+            # 4. If we can get the description at all and can't determine ready state,
+            # assume it's ready (safer option)
+            logger.warning(f"Could not determine ready state for index {index_name}, assuming ready")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Error checking if index is ready: {str(e)}")
             return False
 
     def index_exists(self, index_name: str) -> bool:
@@ -222,11 +290,31 @@ class PineconeAdvancedToolSpec(BaseTool):
                 
             index = self.pc.Index(name)
             stats = index.describe_index_stats()
-            return {
-                "dimension": stats.dimension,
-                "total_vector_count": stats.total_vector_count,
-                "namespaces": stats.namespaces
-            }
+            
+            # Handle different response structures based on Pinecone SDK version
+            # New SDK returns an object, old SDK returned a dict
+            try:
+                # Try to access stats.dimension (newer SDK)
+                return {
+                    "dimension": getattr(stats, "dimension", 0),
+                    "total_vector_count": getattr(stats, "total_vector_count", 0),
+                    "namespaces": getattr(stats, "namespaces", {})
+                }
+            except AttributeError:
+                # Try to access as dict (older SDK)
+                if isinstance(stats, dict):
+                    return {
+                        "dimension": stats.get("dimension", 0),
+                        "total_vector_count": stats.get("total_vector_count", 0),
+                        "namespaces": stats.get("namespaces", {})
+                    }
+                    
+                # If all else fails, return a minimal structure
+                return {
+                    "dimension": 0,
+                    "total_vector_count": 0,
+                    "namespaces": {}
+                }
         except Exception as e:
             logger.error(f"Error getting index stats: {str(e)}")
             return {}
@@ -234,42 +322,72 @@ class PineconeAdvancedToolSpec(BaseTool):
     async def process_documents(self, documents: List[Document]) -> bool:
         """Process and upsert documents using the ingestion pipeline"""
         try:
-            # Run pipeline on documents and get nodes
-            nodes = self.pipeline.run(documents=documents)
-            
-            # Get embeddings and metadata for each node
-            vectors = []
-            
-            for i, node in enumerate(nodes):
-                # Get embedding
-                embedding = await self.embed_model._aget_text_embedding(node.text)
+            # Try using the pipeline first
+            try:
+                logger.info(f"Processing {len(documents)} documents using ingestion pipeline")
+                # Run pipeline on documents and get nodes
+                nodes = self.pipeline.run(documents=documents)
+                logger.info(f"Pipeline successfully processed {len(nodes)} nodes")
+                return True
+            except Exception as pipeline_error:
+                # If pipeline fails, use direct upsert as fallback
+                logger.warning(f"Pipeline processing failed: {pipeline_error}. Falling back to direct upsert.")
                 
-                # Get metadata
-                node_metadata = {
-                    'text': node.text,
-                    **node.metadata
-                }
+                # Process documents directly
+                nodes = []
+                for doc in documents:
+                    nodes.append(doc)
                 
-                # Create a stable, unique ID based on content and metadata
-                content_hash = hashlib.md5(node.text.encode()).hexdigest()
-                metadata_str = json.dumps(sorted(node_metadata.items()))
-                metadata_hash = hashlib.md5(metadata_str.encode()).hexdigest()
-                stable_id = f"{content_hash}_{metadata_hash}"
-                node_metadata['doc_id'] = stable_id
+                # Get embeddings and metadata for each node
+                vectors = []
                 
-                # Create vector tuple (id, values, metadata)
-                vectors.append((stable_id, embedding, node_metadata))
-            
-            # Log vectors being upserted
-            logger.info(f"Upserting {len(vectors)} vectors to Pinecone")
-            for vid, _, meta in vectors:
-                logger.info(f"Vector ID: {vid}, Metadata: {meta.get('stocks', [])}, Channel: {meta.get('channel_name')}")
-            
-            # Upsert to Pinecone
-            self.index.upsert(vectors=vectors)
-            
-            logger.info(f"Successfully processed and stored {len(nodes)} nodes")
-            return True
+                for i, node in enumerate(nodes):
+                    # Get the text content - handle both Document and Node objects
+                    text = node.text if hasattr(node, 'text') else str(node)
+                    
+                    # Get embedding
+                    embedding = await self.embed_model._aget_text_embedding(text)
+                    
+                    # Get metadata - handle both Document and Node objects
+                    if hasattr(node, 'metadata') and node.metadata:
+                        node_metadata = {
+                            'text': text,
+                            **node.metadata
+                        }
+                    else:
+                        node_metadata = {'text': text}
+                    
+                    # Create a stable, unique ID based on content and metadata
+                    content_hash = hashlib.md5(text.encode()).hexdigest()
+                    metadata_str = json.dumps(sorted(node_metadata.items()))
+                    metadata_hash = hashlib.md5(metadata_str.encode()).hexdigest()
+                    stable_id = f"{content_hash}_{metadata_hash}"
+                    node_metadata['doc_id'] = stable_id
+                    
+                    # Create vector tuple (id, values, metadata)
+                    vectors.append((stable_id, embedding, node_metadata))
+                
+                # Log vectors being upserted
+                logger.info(f"Upserting {len(vectors)} vectors to Pinecone directly")
+                for vid, _, meta in vectors[:3]:  # Log only first 3 vectors to avoid excessive logging
+                    logger.info(f"Vector ID: {vid}, Metadata keys: {list(meta.keys())}")
+                
+                try:
+                    # Try upsert using the Pinecone SDK v6+ syntax
+                    logger.info("Attempting upsert with Pinecone v6+ SDK")
+                    self.index.upsert(vectors=vectors)
+                except Exception as v6_error:
+                    logger.warning(f"Upsert with v6+ SDK failed: {v6_error}. Trying v5 syntax.")
+                    try:
+                        # Try older Pinecone SDK v5 syntax
+                        self.index.upsert(vectors=[(vid, vec, meta) for vid, vec, meta in vectors])
+                    except Exception as v5_error:
+                        logger.error(f"All upsert attempts failed: {v5_error}")
+                        raise
+                
+                logger.info(f"Successfully processed and stored {len(nodes)} nodes directly")
+                return True
+                
         except Exception as e:
             logger.error(f"Error processing documents: {str(e)}")
             return False
@@ -280,21 +398,82 @@ class PineconeAdvancedToolSpec(BaseTool):
             # Get query embedding
             query_embedding = await self.embed_model._aget_text_embedding(query_text)
             
-            # Query Pinecone
-            query_response = self.index.query(
-                vector=query_embedding,
-                top_k=top_k,
-                filter=filter,
-                include_metadata=True
-            )
-            
-            # Format results
-            formatted_results = []
-            for match in query_response.matches:
-                formatted_results.append({
-                    'score': match.score,
-                    'metadata': match.metadata
-                })
+            # Try different query approaches for compatibility with different Pinecone SDK versions
+            try:
+                logger.info(f"Querying Pinecone with top_k={top_k} using v6+ SDK approach")
+                # Try newer SDK query approach
+                query_response = self.index.query(
+                    vector=query_embedding,
+                    top_k=top_k,
+                    filter=filter,
+                    include_metadata=True
+                )
+                
+                # Format results based on response structure
+                formatted_results = []
+                
+                # Check if response has 'matches' attribute (newer SDK)
+                if hasattr(query_response, 'matches'):
+                    for match in query_response.matches:
+                        try:
+                            # Try accessing as object properties first
+                            formatted_results.append({
+                                'score': getattr(match, 'score', 0.0),
+                                'metadata': getattr(match, 'metadata', {})
+                            })
+                        except AttributeError:
+                            # Try dict access if object access fails
+                            formatted_results.append({
+                                'score': match.get('score', 0.0),
+                                'metadata': match.get('metadata', {})
+                            })
+                # Check if response is dict with 'matches' key (older SDK)
+                elif isinstance(query_response, dict) and 'matches' in query_response:
+                    for match in query_response['matches']:
+                        formatted_results.append({
+                            'score': match.get('score', 0.0),
+                            'metadata': match.get('metadata', {})
+                        })
+                else:
+                    # Handle case where response structure is unknown
+                    logger.warning(f"Unexpected query response structure: {type(query_response)}")
+                    # Try to extract something useful
+                    if isinstance(query_response, list):
+                        for item in query_response:
+                            if isinstance(item, dict):
+                                formatted_results.append({
+                                    'score': item.get('score', 0.0),
+                                    'metadata': item.get('metadata', {})
+                                })
+                
+                logger.info(f"Query returned {len(formatted_results)} results")
+                    
+            except Exception as e:
+                logger.warning(f"Error with v6+ query approach: {e}. Trying v5 approach...")
+                try:
+                    # Try older SDK query approach
+                    query_response = self.index.query(
+                        queries=[query_embedding],  # Array instead of single vector
+                        top_k=top_k,
+                        include_metadata=True,
+                        filter=filter
+                    )
+                    
+                    formatted_results = []
+                    # Handle different response structures
+                    if isinstance(query_response, dict) and 'results' in query_response:
+                        for match in query_response['results'][0]['matches']:
+                            formatted_results.append({
+                                'score': match.get('score', 0.0),
+                                'metadata': match.get('metadata', {})
+                            })
+                    else:
+                        logger.warning(f"Unexpected query response structure from v5 approach")
+                        return []
+                        
+                except Exception as e2:
+                    logger.error(f"All query attempts failed: {e2}")
+                    return []
             
             return formatted_results
         except Exception as e:

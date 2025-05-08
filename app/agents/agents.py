@@ -1771,17 +1771,22 @@ class AgentWorkflow:
                 results["technical_analysis"] = {"status": "error", "error": str(tech_error)}
                 return {"status": "error", "error": error_msg}
             
-            try:
-                # Step 2: Market Analysis
-                logger.info("Starting market analysis step")
-                market_result = await self.agents['market'].execute(analysis_data)
-                analysis_data.update(market_result)
-                results["market_analysis"] = {"status": "completed"}
-            except Exception as market_error:
-                error_msg = f"Market analysis failed: {str(market_error)}"
-                logger.error(error_msg)
-                results["market_analysis"] = {"status": "error", "error": str(market_error)}
-                return {"status": "error", "error": error_msg}
+            # DISABLED: Market Analysis step (not ready yet)
+            logger.info("Skipping market analysis step - functionality not ready")
+            results["market_analysis"] = {"status": "skipped", "message": "Market analysis functionality not ready yet"}
+            
+            # Original code preserved for future re-enabling:
+            # try:
+            #     # Step 2: Market Analysis
+            #     logger.info("Starting market analysis step")
+            #     market_result = await self.agents['market'].execute(analysis_data)
+            #     analysis_data.update(market_result)
+            #     results["market_analysis"] = {"status": "completed"}
+            # except Exception as market_error:
+            #     error_msg = f"Market analysis failed: {str(market_error)}"
+            #     logger.error(error_msg)
+            #     results["market_analysis"] = {"status": "error", "error": str(market_error)}
+            #     return {"status": "error", "error": error_msg}
             
             try:
                 # Step 3: RAG Processing
