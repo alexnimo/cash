@@ -1269,6 +1269,8 @@ Operations:
                 
                 # Property names
                 highlights_name = self.properties.get("key_points", {}).get("name", "Highlights")
+                
+                # Get the date property name from the config
                 update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")
                 
                 # Only add properties that exist
@@ -1277,10 +1279,21 @@ Operations:
                         "rich_text": [{"text": {"content": key_points_text[:2000]}}]
                     }
                 
-                if update_date_name in existing_properties:
-                    valid_properties[update_date_name] = {
-                        "date": {"start": datetime.now().isoformat()}
-                    }
+                # Always update the date field when updating a stock
+                current_date = datetime.now().isoformat()
+                
+                # Add the date property to the update using both the configured name and a fallback
+                # This ensures at least one version will work
+                valid_properties[update_date_name] = {
+                    "date": {"start": current_date}
+                }
+                
+                # Also try with a hard-coded fallback name that we know exists
+                valid_properties["Update Date"] = {
+                    "date": {"start": current_date}
+                }
+                
+                logger.info(f"Forcing date property update with multiple approaches: {update_date_name} and 'Update Date'")
                 
                 # Update the page with valid properties
                 if valid_properties:
@@ -1313,17 +1326,28 @@ Operations:
             # If page doesn't exist, create it
             else:
                 # Create new page with properties
+                # Get current date once
+                current_date = datetime.now().isoformat()
+                
+                # Initialize properties with required fields
                 properties = {
                     self.properties.get("stock_ticker", {}).get("name", "Stock Ticker"): {
                         "title": [{"text": {"content": ticker.upper()}}]
                     },
                     self.properties.get("key_points", {}).get("name", "Highlights"): {
                         "rich_text": [{"text": {"content": key_points_text[:2000]}}]
-                    },
-                    self.properties.get("update_date", {}).get("name", "Update Date"): {
-                        "date": {"start": datetime.now().isoformat()}
                     }
                 }
+                
+                # Get the date property name from the config
+                update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")
+                
+                # Always add the date property when creating a new page
+                properties[update_date_name] = {
+                    "date": {"start": current_date}
+                }
+                
+                logger.info(f"Adding date property to new page: {update_date_name} with {current_date}")
                 
                 response = await self.notion.pages.create(
                     parent={"database_id": self.database_id},
@@ -1392,7 +1416,9 @@ Operations:
             
             # Map property names to actual property names in the database using config
             highlights_name = self.properties.get("key_points", {}).get("name", "Highlights")  # Map key_points to Highlights
-            update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")  # Use Update Date instead of Date
+            
+            # Get the date property name from the notion config
+            update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")  # Use Update Date from config
             
             # Check which properties exist before adding them to update_props
             if highlights_name in existing_properties:
@@ -1403,13 +1429,21 @@ Operations:
             else:
                 logger.info(f"Property '{highlights_name}' doesn't exist in the database")
                 
-            if update_date_name in existing_properties:
-                update_props[update_date_name] = {
-                    "date": {"start": datetime.now().isoformat()}
-                }
-                logger.info(f"Will update '{update_date_name}' property with current date")
-            else:
-                logger.info(f"Property '{update_date_name}' doesn't exist in the database")
+            # Always update the date property regardless of whether it exists or not
+            current_date = datetime.now().isoformat()
+            
+            # Force the date property update using multiple approaches to ensure it works
+            # 1. Use the configured property name
+            update_props[update_date_name] = {
+                "date": {"start": current_date}
+            }
+            
+            # 2. Also try with a literal property name as a fallback
+            update_props["Update Date"] = {
+                "date": {"start": current_date}
+            }
+            
+            logger.info(f"Forcing date property update using multiple approaches: {update_date_name} and 'Update Date'")
             
             # Only attempt to update if we have properties to update
             if update_props:
@@ -1745,9 +1779,46 @@ Operations:
         if not text:
             return [{"text": {"content": ""}}]
             
-        # Check for dollar amounts and percentages to make bold
         import re
         
+        # Check if this is a structured analysis with sections like [Technical Context], [Setup Quality], etc.
+        section_pattern = r'\[(.*?)\]\s'  # Match [Section Title] format
+        sections = re.findall(section_pattern, text)
+        
+        # If we have structured sections, format them with proper line breaks and styling
+        if sections and len(sections) >= 2:
+            logger.info(f"Detected structured text with sections: {sections}")
+            
+            # Split text by section markers
+            parts = []
+            section_splits = re.split(section_pattern, text)
+            
+            # First element is always empty or text before first section
+            if section_splits[0].strip():
+                parts.append({"text": {"content": section_splits[0].strip() + "\n\n"}})
+            
+            # Process each section
+            for i in range(len(sections)):
+                section_title = sections[i]
+                section_content = section_splits[i + 1].strip()
+                
+                # Add section title with formatting
+                parts.append({
+                    "text": {"content": f"[{section_title}]\n"},
+                    "annotations": {"bold": True, "color": "blue"}
+                })
+                
+                # Add section content with enhanced formatting
+                section_formatted_parts = self._format_section_content(section_content)
+                parts.extend(section_formatted_parts)
+                
+                # Add extra line break between sections
+                if i < len(sections) - 1:
+                    parts.append({"text": {"content": "\n\n"}})
+            
+            return parts
+        
+        # If not structured, use the regular pattern-based formatting
         parts = []
         
         # Look for patterns like $123.45, +10%, -5%, keywords like support/resistance
@@ -1760,8 +1831,102 @@ Operations:
             # Technical terms
             (r'\b(support|resistance|breakout|breakdown|trend|bullish|bearish)\b', {"bold": True}),
             # Emphasis on key metrics
-            (r'\b(RSI|MACD|EMA|SMA|volume)\b', {"bold": True, "color": "purple"})
+            (r'\b(RSI|MACD|EMA|SMA|volume)\b', {"bold": True, "color": "purple"}),
+            # Key decision terms
+            (r'\b(recommend|action|target|stop loss)\b', {"bold": True, "color": "orange"})
         ]
+        
+        # Find all matches
+        matches = []
+        for pattern, formatting in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                matches.append((match.start(), match.end(), match.group(), formatting))
+        
+        # Sort matches by position
+        matches.sort(key=lambda x: x[0])
+        
+        # Process the text with matches
+        current_pos = 0
+        for start, end, matched_text, formatting in matches:
+            # Add text before match
+            if start > current_pos:
+                parts.append({"text": {"content": text[current_pos:start]}})
+            
+            # Add formatted match
+            parts.append({"text": {"content": matched_text}, "annotations": formatting})
+            current_pos = end
+        
+        # Add remaining text
+        if current_pos < len(text):
+            parts.append({"text": {"content": text[current_pos:]}})
+        
+        # If no patterns matched, return the original text
+        if not parts:
+            parts = [{"text": {"content": text}}]
+            
+        return parts
+        
+    def _format_section_content(self, content):
+        """Format content within a section, adding formatting and line breaks for readability"""
+        parts = []
+        
+        # Check for very long text that should be broken into paragraphs
+        # If content is longer than ~100 chars and doesn't have line breaks, add some
+        if len(content) > 100 and '\n' not in content:
+            # Split into sentences
+            sentences = re.split(r'(?<=[.!?])\s+', content)
+            
+            # Group sentences into paragraphs (3-4 sentences per paragraph)
+            paragraphs = []
+            current_paragraph = []
+            
+            for sentence in sentences:
+                current_paragraph.append(sentence)
+                if len(current_paragraph) >= 3:
+                    paragraphs.append(' '.join(current_paragraph))
+                    current_paragraph = []
+            
+            # Add any remaining sentences
+            if current_paragraph:
+                paragraphs.append(' '.join(current_paragraph))
+            
+            # Join paragraphs with double line breaks
+            content = '\n\n'.join(paragraphs)
+        
+        # Apply pattern-based formatting within the section content
+        patterns = [
+            # Price patterns
+            (r'\$\d+\.?\d*', {"bold": True, "color": "blue"}),
+            # Percentage patterns
+            (r'\+\d+\.?\d*%', {"bold": True, "color": "green"}),
+            (r'\-\d+\.?\d*%', {"bold": True, "color": "red"}),
+            # Technical terms
+            (r'\b(support|resistance|breakout|breakdown|trend|bullish|bearish)\b', {"bold": True}),
+            # Emphasis on key metrics
+            (r'\b(RSI|MACD|EMA|SMA|volume)\b', {"bold": True, "color": "purple"}),
+            # Key decision terms
+            (r'\b(recommend|action|target|stop loss)\b', {"bold": True, "color": "orange"})
+        ]
+        
+        # If there are line breaks already, preserve them
+        if '\n' in content:
+            paragraphs = content.split('\n')
+            for i, paragraph in enumerate(paragraphs):
+                if i > 0:
+                    parts.append({"text": {"content": "\n"}})
+                
+                # Apply pattern formatting to this paragraph
+                pattern_parts = self._apply_pattern_formatting(paragraph, patterns)
+                parts.extend(pattern_parts)
+        else:
+            # Process a single block of text with patterns
+            parts = self._apply_pattern_formatting(content, patterns)
+        
+        return parts
+    
+    def _apply_pattern_formatting(self, text, patterns):
+        """Apply pattern-based formatting to a block of text"""
+        parts = []
         
         # Find all matches
         matches = []
@@ -1911,8 +2076,28 @@ Operations:
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 return
             
-            # Now add content to the channel toggle section
+            # Now add content to the channel toggle section with proper error handling
             if new_channel_id:
+                # First add a simple paragraph to always ensure there's visible content
+                try:
+                    # Add a basic plain text paragraph first to ensure content always appears
+                    await self.notion.blocks.children.append(
+                        block_id=new_channel_id,
+                        children=[{
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [{
+                                    "type": "text",
+                                    "text": {"content": f"Analysis for {channel_name} - {datetime.now().strftime('%Y-%m-%d')}"}
+                                }]
+                            }
+                        }]
+                    )
+                    logger.info(f"Added initial content paragraph to ensure toggle visibility")
+                except Exception as e:
+                    logger.error(f"Error adding initial content: {str(e)}")
+                
                 # Current date for the update info
                 current_date = datetime.now().strftime("%Y-%m-%d")
                 
@@ -1937,13 +2122,23 @@ Operations:
                     }
                 ]
                 
-                # Add summary with enhanced formatting
+                # Add summary using basic formatting to ensure content appears
                 if summary:
+                    # Add subheading for summary to make it more visible
+                    channel_content.append({
+                        "object": "block",
+                        "type": "heading_3",
+                        "heading_3": {
+                            "rich_text": [{"type": "text", "text": {"content": "Summary"}, "annotations": {"bold": True}}]
+                        }
+                    })
+                    
+                    # Add the summary content with very basic formatting - no rich text enhancement
                     channel_content.append({
                         "object": "block",
                         "type": "paragraph",
                         "paragraph": {
-                            "rich_text": self._enhance_text_formatting(summary)
+                            "rich_text": [{"type": "text", "text": {"content": summary}}]
                         }
                     })
                 
@@ -1958,15 +2153,18 @@ Operations:
                         }
                     })
                     
-                    # Add each key point as a bullet with enhanced formatting
+                    # Add each key point as a bullet with basic formatting to ensure content appears
                     for point in key_points:
-                        channel_content.append({
-                            "object": "block",
-                            "type": "bulleted_list_item",
-                            "bulleted_list_item": {
-                                "rich_text": self._enhance_text_formatting(point)
-                            }
-                        })
+                        # Clean the point text first to ensure it's valid
+                        clean_point = point.strip()
+                        if clean_point:
+                            channel_content.append({
+                                "object": "block",
+                                "type": "bulleted_list_item",
+                                "bulleted_list_item": {
+                                    "rich_text": [{"type": "text", "text": {"content": clean_point}}]
+                                }
+                            })
                 
                 # Add bottom update date
                 channel_content.append({
@@ -1986,16 +2184,51 @@ Operations:
                     }
                 })
                 
-                # Add the content to the channel toggle
-                logger.info(f"Adding content to channel '{channel_name}'")
+                # Add content to the channel toggle with robust error handling
                 try:
-                    await self.notion.blocks.children.append(
-                        block_id=new_channel_id,
-                        children=channel_content
-                    )
-                    logger.info(f"Successfully added content to channel '{channel_name}'")
+                    # Log the content being added
+                    logger.info(f"Adding {len(channel_content)} content blocks to channel toggle")
+                    
+                    # Add contents in smaller batches to avoid API limits
+                    batch_size = 10
+                    for i in range(0, len(channel_content), batch_size):
+                        batch = channel_content[i:i+batch_size]
+                        await self.notion.blocks.children.append(
+                            block_id=new_channel_id,
+                            children=batch
+                        )
+                        logger.info(f"Added batch {i//batch_size + 1} of content to channel '{channel_name}'")
+                    
+                    logger.info(f"Successfully added all content to channel '{channel_name}'")
                 except Exception as e:
                     logger.error(f"Error adding content to channel: {str(e)}")
                     logger.error(f"Traceback: {traceback.format_exc()}")
+                    
+                    # Fallback mechanism - try adding content directly to the main Technical Analysis section
+                    try:
+                        logger.info("Attempting fallback: adding content directly to Technical Analysis section")
+                        await self.notion.blocks.children.append(
+                            block_id=tech_analysis_block_id,
+                            children=[{
+                                "object": "block",
+                                "type": "paragraph",
+                                "paragraph": {
+                                    "rich_text": [{
+                                        "type": "text",
+                                        "text": {"content": f"Content for {channel_name}:"}
+                                    }]
+                                }
+                            }]
+                        )
+                        # Add contents in smaller batches
+                        for i in range(0, len(channel_content), batch_size):
+                            batch = channel_content[i:i+batch_size]
+                            await self.notion.blocks.children.append(
+                                block_id=tech_analysis_block_id,
+                                children=batch
+                            )
+                        logger.info("Fallback successful: added content directly to Technical Analysis section")
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback also failed: {str(fallback_error)}")
         else:
             logger.error("No Technical Analysis block ID found, unable to update content")

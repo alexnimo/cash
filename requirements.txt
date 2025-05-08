@@ -18,7 +18,7 @@ youtube-transcript-api>=0.6.1
 reportlab>=4.0.8
 PyPDF2>=3.0.0
 notion-client>=2.1.0
-pinecone-client>=3.0.0
+pinecone-client==5.0.1
 lancedb>=0.3.3
 pydantic-settings>=2.1.0
 python-jose[cryptography]>=3.3.0

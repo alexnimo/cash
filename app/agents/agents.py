@@ -84,11 +84,23 @@ def parse_date(date_str: str) -> datetime.datetime:
 class BaseFinanceAgent(ReActAgent):
     """Base class for finance-specific agents"""
     def __init__(self, tools: List[BaseTool], llm: Any, memory: ChatMemoryBuffer, config: Dict[str, Any]):
-        # Set up debug directory from config
-        # Fix: Use positional argument for default value in dict.get
+        # Get the unified config to access storage settings
+        unified_config = get_config()
+        
+        # Get the base storage path from config
+        storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
+        
+        # Check if agent debug is enabled
+        agent_debug_enabled = unified_config.get('agents', 'agent_debug', default=False)
+        
+        # Set up debug directory from config, relative to storage base path
         debug_dir = config.get('debug_dir', 'debug')
-        self.debug_dir = Path(debug_dir)
-        self.debug_dir.mkdir(exist_ok=True)
+        self.debug_dir = Path(storage_base_path) / debug_dir
+        
+        # Only create debug directory if agent_debug is enabled
+        self.agent_debug_enabled = agent_debug_enabled
+        if self.agent_debug_enabled:
+            self.debug_dir.mkdir(exist_ok=True, parents=True)
         
         # Store the configuration
         self.config = config
@@ -170,11 +182,12 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
     async def execute(self, analysis_data: Union[Dict, str, Path]) -> Dict:
         """Execute technical analysis workflow"""
         try:
-            # Save input data for debugging
-            debug_file = self.debug_dir / f"ta_input_{int(time.time())}.json"
-            with open(debug_file, "w") as f:
-                json.dump(analysis_data, f, indent=2)
-            logger.info(f"Saved technical analysis input to {debug_file}")
+            # Save input data for debugging only if agent_debug is enabled
+            if self.agent_debug_enabled:
+                debug_file = self.debug_dir / f"ta_input_{int(time.time())}.json"
+                with open(debug_file, "w") as f:
+                    json.dump(analysis_data, f, indent=2)
+                logger.info(f"Saved technical analysis input to {debug_file}")
 
             # Get tracked stocks from Notion
             tracked_stocks = await self.notion_tool.get_all_tickers()
@@ -273,17 +286,20 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
 class MarketAnalysisAgent(BaseFinanceAgent):
     """Agent for market analysis tasks"""
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
-        # Store the configuration
+        # Initialize base agent first, which sets up debug dir with proper path
+        super().__init__(tools=tools, llm=llm, memory=memory, config=config)
+        
+        # Store the configuration reference
         self.config = config
         
-        # Set up debug directory from config
-        debug_dir = config.get('debug_dir', 'debug')
-        self.debug_dir = Path(debug_dir)
-        self.debug_dir.mkdir(exist_ok=True)
+        # Initialize RAG agent with proper config
+        # Pass the agent_debug_enabled flag to the RAG agent
+        rag_config = config.get('rag', {})
+        if 'agent_debug' not in rag_config:
+            rag_config['agent_debug'] = self.agent_debug_enabled
         
-        # Initialize RAG agent
         self.rag_agent = RAGAgent(
-            config=config.get('rag', {}),
+            config=rag_config,
             llm_service=llm
         )
         
@@ -347,11 +363,12 @@ class MarketAnalysisAgent(BaseFinanceAgent):
     async def execute(self, market_data: Union[Dict, str, Path]) -> Dict:
         """Execute market analysis workflow"""
         try:
-            # Save input data for debugging
-            debug_file = self.debug_dir / f"market_input_{int(time.time())}.json"
-            with open(debug_file, "w") as f:
-                json.dump(market_data, f, indent=2)
-            logger.info(f"Saved market input data to {debug_file}")
+            # Save input data for debugging only if agent_debug is enabled
+            if self.agent_debug_enabled:
+                debug_file = self.debug_dir / f"market_input_{int(time.time())}.json"
+                with open(debug_file, "w") as f:
+                    json.dump(market_data, f, indent=2)
+                logger.info(f"Saved market input data to {debug_file}")
 
             # Get tracked stocks from Notion
             tracked_stocks = await self.notion_tool.get_all_tickers()
@@ -411,10 +428,12 @@ class MarketAnalysisAgent(BaseFinanceAgent):
             else:
                 consolidated_report = json.loads(str(response))
             
-            # Save consolidated report for debugging
-            consolidated_debug_file = self.debug_dir / f"market_consolidated_{int(time.time())}.json"
-            with open(consolidated_debug_file, "w") as f:
-                json.dump(consolidated_report, f, indent=2)
+            # Save consolidated report for debugging only if agent_debug is enabled
+            if self.agent_debug_enabled:
+                consolidated_debug_file = self.debug_dir / f"market_consolidated_{int(time.time())}.json"
+                with open(consolidated_debug_file, "w") as f:
+                    json.dump(consolidated_report, f, indent=2)
+                logger.info(f"Saved consolidated report to {consolidated_debug_file}")
 
             # Pass to RAG agent for processing
             rag_result = await self.rag_agent.execute(consolidated_report)
@@ -452,8 +471,24 @@ class RAGAgent:
     def __init__(self, config: Dict[str, Any], llm_service: Any):
         self.config = config
         self.llm_service = llm_service
-        self.debug_dir = Path(config.get('debug_dir', 'debug'))
-        self.debug_dir.mkdir(exist_ok=True)
+        
+        # Get the unified config to access storage settings
+        unified_config = get_config()
+        
+        # Get the base storage path from config
+        storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
+        
+        # Check if agent debug is enabled from either the passed config or global config
+        self.agent_debug_enabled = config.get('agent_debug', unified_config.get('agents', 'agent_debug', default=False))
+        
+        # Set up debug directory from config, relative to storage base path
+        debug_dir = config.get('debug_dir', 'debug')
+        self.debug_dir = Path(storage_base_path) / debug_dir
+        
+        # Only create debug directory if agent_debug is enabled
+        if self.agent_debug_enabled:
+            self.debug_dir.mkdir(exist_ok=True, parents=True)
+            
         self.similarity_threshold = config.get('similarity_threshold', 0.85)
         
         # Initialize vector store and embedding model
@@ -940,12 +975,12 @@ class RAGAgent:
                 else:
                     logger.warning(f"Section for stocks {section.get('stocks', [])} has no frames")
 
-            # Save debug information
-            debug_file = self.debug_dir / f"notion_data_{int(time.time())}.json"
-            with open(debug_file, "w") as f:
-                
-                json.dump(notion_report, f, indent=2)
-            logger.info(f"Saved data being sent to Notion: {debug_file}")
+            # Save debug information only if agent_debug is enabled
+            if self.agent_debug_enabled:
+                debug_file = self.debug_dir / f"notion_data_{int(time.time())}.json"
+                with open(debug_file, "w") as f:
+                    json.dump(notion_report, f, indent=2)
+                logger.info(f"Saved data being sent to Notion: {debug_file}")
 
             # Update Notion
             logger.info("Calling Notion agent execute method...")
@@ -991,9 +1026,22 @@ class NotionAgent(BaseFinanceAgent):
         # Store the original config
         self.config = config.copy()
         
-        # Create debug directory
-        self.debug_dir = Path(self.config.get('debug_dir', 'debug'))
-        self.debug_dir.mkdir(exist_ok=True)
+        # Get the unified config to access storage settings
+        unified_config = get_config()
+        
+        # Get the base storage path from config
+        storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
+        
+        # Check if agent debug is enabled from either the passed config or global config
+        self.agent_debug_enabled = config.get('agent_debug', unified_config.get('agents', 'agent_debug', default=False))
+        
+        # Set up debug directory from config, relative to storage base path
+        debug_dir = self.config.get('debug_dir', 'debug')
+        self.debug_dir = Path(storage_base_path) / debug_dir
+        
+        # Only create debug directory if agent_debug is enabled
+        if self.agent_debug_enabled:
+            self.debug_dir.mkdir(exist_ok=True, parents=True)
         
         # Set explicit ReAct mode configuration 
         self.config['response_mode'] = 'REACT'
@@ -1723,17 +1771,22 @@ class AgentWorkflow:
                 results["technical_analysis"] = {"status": "error", "error": str(tech_error)}
                 return {"status": "error", "error": error_msg}
             
-            try:
-                # Step 2: Market Analysis
-                logger.info("Starting market analysis step")
-                market_result = await self.agents['market'].execute(analysis_data)
-                analysis_data.update(market_result)
-                results["market_analysis"] = {"status": "completed"}
-            except Exception as market_error:
-                error_msg = f"Market analysis failed: {str(market_error)}"
-                logger.error(error_msg)
-                results["market_analysis"] = {"status": "error", "error": str(market_error)}
-                return {"status": "error", "error": error_msg}
+            # DISABLED: Market Analysis step (not ready yet)
+            logger.info("Skipping market analysis step - functionality not ready")
+            results["market_analysis"] = {"status": "skipped", "message": "Market analysis functionality not ready yet"}
+            
+            # Original code preserved for future re-enabling:
+            # try:
+            #     # Step 2: Market Analysis
+            #     logger.info("Starting market analysis step")
+            #     market_result = await self.agents['market'].execute(analysis_data)
+            #     analysis_data.update(market_result)
+            #     results["market_analysis"] = {"status": "completed"}
+            # except Exception as market_error:
+            #     error_msg = f"Market analysis failed: {str(market_error)}"
+            #     logger.error(error_msg)
+            #     results["market_analysis"] = {"status": "error", "error": str(market_error)}
+            #     return {"status": "error", "error": error_msg}
             
             try:
                 # Step 3: RAG Processing

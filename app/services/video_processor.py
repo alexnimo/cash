@@ -279,7 +279,7 @@ async def handle_chunked_response(
     return combined_text
 
 class VideoProcessor:
-    def __init__(self, video_status: Dict[str, Dict]):
+    def __init__(self, video_status: Dict[str, Dict] = None):
         try:
             # Use the unified storage path utilities
             self.video_dir = get_storage_subdir("videos")
@@ -300,10 +300,12 @@ class VideoProcessor:
             self.content_analyzer = ContentAnalyzer()
             
             # Initialize semaphore for parallel processing
-            self.semaphore = asyncio.Semaphore(config.processing.max_parallel_chunks if hasattr(config, 'processing') and hasattr(config.processing, 'max_parallel_chunks') else 3)
+            max_chunks = config.processing.max_parallel_chunks if hasattr(config, 'processing') and hasattr(config.processing, 'max_parallel_chunks') else 3
+            self.semaphore = asyncio.Semaphore(max_chunks)
+            logger.info(f"Initialized semaphore with limit of {max_chunks} concurrent tasks")
             
             # Store reference to global video status
-            self.video_status = video_status
+            self.video_status = video_status if video_status is not None else {}
             
             logger.info(f"Initialized VideoProcessor with video directory: {self.video_dir}")
             
@@ -372,8 +374,42 @@ class VideoProcessor:
                 transcript_data = transcript.fetch()
                 logger.info(f"Got transcript with {len(transcript_data)} segments")
                 
+                # Handle FetchedTranscriptSnippet objects
+                # Extract data in a way that works with both dictionary-like objects and FetchedTranscriptSnippet objects
+                processed_segments = []
+                for segment in transcript_data:
+                    # Try to access attributes as properties first, then fall back to dictionary access
+                    try:
+                        # If it's a FetchedTranscriptSnippet object with properties
+                        segment_dict = {
+                            "text": getattr(segment, "text", ""),
+                            "start": getattr(segment, "start", 0.0),
+                            "duration": getattr(segment, "duration", 0.0)
+                        }
+                    except Exception:
+                        # If it's a dictionary-like object
+                        try:
+                            segment_dict = {
+                                "text": segment.get("text", ""),
+                                "start": segment.get("start", 0.0),
+                                "duration": segment.get("duration", 0.0)
+                            }
+                        except Exception:
+                            # Last resort, try direct dictionary access
+                            try:
+                                segment_dict = {
+                                    "text": segment["text"] if "text" in segment else "",
+                                    "start": segment["start"] if "start" in segment else 0.0,
+                                    "duration": segment["duration"] if "duration" in segment else 0.0
+                                }
+                            except Exception as e:
+                                logger.warning(f"Could not extract data from transcript segment: {e}")
+                                segment_dict = {"text": "", "start": 0.0, "duration": 0.0}
+                    
+                    processed_segments.append(segment_dict)
+                
                 # Save raw transcript text
-                raw_text = ' '.join(segment['text'] for segment in transcript_data)
+                raw_text = ' '.join(segment["text"] for segment in processed_segments)
                 raw_transcript_path = get_storage_path(f"videos/raw_transcripts/{video.id}.txt")
                 with open(raw_transcript_path, 'w', encoding='utf-8') as f:
                     f.write(raw_text)
@@ -387,7 +423,7 @@ class VideoProcessor:
                         "language": transcript_language,
                         "channel_name": video.metadata.channel_name if video.metadata else "",
                         "video_name": video.metadata.video_title if video.metadata else "",
-                        "segments": transcript_data
+                        "segments": processed_segments
                     }, f, ensure_ascii=False, indent=2)
                 
                 logger.info(f"Successfully saved transcript to {transcript_path}")
@@ -402,6 +438,25 @@ class VideoProcessor:
         except Exception as e:
             logger.error(f"Error getting YouTube transcript: {str(e)}", exc_info=True)
             return None
+            
+    async def __del__(self):
+        try:
+            # Close any open resources
+            if hasattr(self, 'model_manager'):
+                await self.model_manager.close()
+            
+            # Clean up any semaphores
+            if hasattr(self, 'semaphore'):
+                # Release any acquired semaphores
+                for _ in range(self.semaphore._value):
+                    try:
+                        self.semaphore.release()
+                    except ValueError:
+                        # Stop if we've released too many
+                        break
+                logger.info("Cleaned up semaphores during VideoProcessor deletion")
+        except Exception as e:
+            logger.error(f"Error in VideoProcessor cleanup: {e}")
 
     async def process_video(self, video: Video) -> Video:
         """Process a video by downloading it and generating a transcript."""
@@ -417,6 +472,32 @@ class VideoProcessor:
                 },
                 "url": str(video.url)
             }
+            
+            # Reset semaphore if it was leaked in a previous run
+            try:
+                if hasattr(self, 'semaphore'):
+                    # Create a new semaphore to ensure a clean state
+                    max_chunks = config.processing.max_parallel_chunks if hasattr(config, 'processing') and hasattr(config.processing, 'max_parallel_chunks') else 3
+                    self.semaphore = asyncio.Semaphore(max_chunks)
+                    logger.info(f"Reset semaphore with value {max_chunks}")
+            except Exception as e:
+                logger.warning(f"Failed to reset semaphore: {str(e)}")
+            
+            # Validate transcription configuration before downloading anything
+            try:
+                logger.info("Validating transcription configuration before proceeding")
+                if not hasattr(self, 'model_manager'):
+                    self.model_manager = ModelManager(config)
+                
+                # Test if the transcription model is properly configured by attempting to access it
+                # This will raise an error if configuration is invalid
+                await self.model_manager.get_transcription_model()
+                logger.info("Transcription configuration validated successfully")
+            except Exception as config_error:
+                logger.error(f"Transcription configuration validation failed: {str(config_error)}")
+                self.video_status[video.id]["status"] = "failed"
+                self.video_status[video.id]["error"] = f"Transcription configuration error: {str(config_error)}"
+                raise VideoProcessingError(f"Transcription configuration is invalid: {str(config_error)}")
 
             # Download video
             logger.info(f"Processing video {video.id}")
@@ -443,11 +524,11 @@ class VideoProcessor:
                             transcript_data = json.load(f)
                             logger.info(f"Loaded transcript data with language: {transcript_data.get('language')}")
                             video.transcript = [TranscriptSegment(
-                                start_time=entry['start'],
-                                end_time=entry['start'] + entry['duration'],
-                                text=entry['text'],
-                                language=transcript_data["language"]
-                            ) for entry in transcript_data["segments"]]
+                                start_time=entry.get('start', 0.0),
+                                end_time=entry.get('start', 0.0) + entry.get('duration', 0.0),
+                                text=entry.get('text', ''),
+                                language=transcript_data.get("language", 'en')
+                            ) for entry in transcript_data.get("segments", [])]
                             logger.info(f"Created {len(video.transcript)} transcript segments")
                         self.video_status[video.id]["progress"]["transcribing"] = 100
                         logger.info("Using YouTube transcript")
@@ -469,9 +550,26 @@ class VideoProcessor:
                     video.transcript = await self._generate_transcript(audio_path)
                     self.video_status[video.id]["progress"]["transcribing"] = 100
                     logger.info("Transcript generated successfully")
+                    
+                    # Check if transcript was successfully generated
+                    if not video.transcript or len(video.transcript) == 0:
+                        logger.error(f"No transcript was generated for video {video.id}")
+                        self.video_status[video.id]["status"] = "failed"
+                        self.video_status[video.id]["error"] = "Transcript generation failed"
+                        raise VideoProcessingError("No transcript was generated - cannot proceed with analysis")
+                        
                 except Exception as e:
                     logger.error(f"Failed to generate transcript: {str(e)}")
+                    self.video_status[video.id]["status"] = "failed"
+                    self.video_status[video.id]["error"] = f"Failed to generate transcript: {str(e)}"
                     raise VideoProcessingError(f"Failed to generate transcript: {str(e)}")
+                    
+            # Verify we have a valid transcript before proceeding
+            if not video.transcript or len(video.transcript) == 0:
+                logger.error(f"No valid transcript available for video {video.id}")
+                self.video_status[video.id]["status"] = "failed"
+                self.video_status[video.id]["error"] = "No valid transcript available"
+                raise VideoProcessingError("No valid transcript available - cannot proceed with analysis")
                     
             # Extract frames
             logger.info(f"Extracting frames from video {video.id}")
@@ -723,46 +821,50 @@ class VideoProcessor:
         """
         logger.info(f"Processing audio chunk: {chunk_path}")
         try:
-            # Initialize model manager if needed
-            if not hasattr(self, 'model_manager'):
-                self.model_manager = ModelManager(settings)
+            # Acquire semaphore to control parallel processing
+            async with self.semaphore:
+                logger.info(f"Acquired semaphore for processing chunk: {chunk_path}")
                 
-            # Upload the audio file
-            uploaded_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
-            logger.info(f"Uploaded audio chunk for processing: {uploaded_file.name}")
-            
-            # Create the transcription prompt
-            prompt = "Please provide a complete and accurate transcription of this audio. Maintain the original meaning and include all spoken content."
-            
-            # Get the model - use the synchronous version to avoid coroutine issues
-            model = self.model_manager.get_transcription_model_instance()
-            
-            # Generate content with audio input
-            response = await asyncio.to_thread(
-                model.generate_content, 
-                [
-                    prompt,
-                    uploaded_file
-                ],
-                generation_config={
-                    "temperature": 0.2,
-                }
-            )
-            
-            # Handle potentially chunked responses (if the transcription is long)
-            result = await handle_chunked_response(
-                model=model,
-                original_prompt=prompt,
-                first_response=response,
-                additional_contents=[uploaded_file],
-                max_continuation_attempts=5
-            )
-            
-            # Delete the uploaded file
-            await asyncio.to_thread(genai.delete_file, uploaded_file.name)
-            logger.info(f"Deleted uploaded audio chunk: {uploaded_file.name}")
-            
-            return result
+                # Initialize model manager if needed
+                if not hasattr(self, 'model_manager'):
+                    self.model_manager = ModelManager(config)
+                    
+                # Upload the audio file
+                uploaded_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
+                logger.info(f"Uploaded audio chunk for processing: {uploaded_file.name}")
+                
+                # Create the transcription prompt
+                prompt = "Please provide a complete and accurate transcription of this audio. Maintain the original meaning and include all spoken content."
+                
+                # Get the model - use the synchronous version to avoid coroutine issues
+                model = self.model_manager.get_transcription_model_instance()
+                
+                # Generate content with audio input
+                response = await asyncio.to_thread(
+                    model.generate_content, 
+                    [
+                        prompt,
+                        uploaded_file
+                    ],
+                    generation_config={
+                        "temperature": 0.2,
+                    }
+                )
+                
+                # Handle potentially chunked responses (if the transcription is long)
+                result = await handle_chunked_response(
+                    model=model,
+                    original_prompt=prompt,
+                    first_response=response,
+                    additional_contents=[uploaded_file],
+                    max_continuation_attempts=5
+                )
+                
+                # Delete the uploaded file
+                await asyncio.to_thread(genai.delete_file, uploaded_file.name)
+                logger.info(f"Deleted uploaded audio chunk: {uploaded_file.name}")
+                
+                return result
             
         except Exception as e:
             logger.error(f"Error processing audio chunk {chunk_path}: {e}")
@@ -834,8 +936,8 @@ class VideoProcessor:
                     logger.error(f"Audio file not found at path: {audio_path}")
                     return None
 
-                MAX_CHUNK_DURATION_MS = settings.transcript_generation.max_chunk_duration_minutes * 60 * 1000
-                logger.info(f"Maximum audio chunk duration set to {settings.transcript_generation.max_chunk_duration_minutes} minutes ({MAX_CHUNK_DURATION_MS} ms).")
+                MAX_CHUNK_DURATION_MS = config.get('transcript_generation', 'max_chunk_duration_minutes', default=30) * 60 * 1000
+                logger.info(f"Maximum audio chunk duration set to {config.get('transcript_generation', 'max_chunk_duration_minutes', default=30)} minutes ({MAX_CHUNK_DURATION_MS} ms).")
 
                 try:
                     audio_segment = await asyncio.to_thread(AudioSegment.from_file, audio_path)

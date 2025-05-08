@@ -51,45 +51,19 @@ class ModelManager:
         self.models = {}
         self.model_configs = {}
         
-        # Extract model configurations if they exist
-        if hasattr(self.config, 'model'):
-            if hasattr(self.config.model, 'video_analysis'):
-                self.model_configs[self.config.model.video_analysis.name] = self.config.model.video_analysis
-            if hasattr(self.config.model, 'frame_analysis'):
-                self.model_configs[self.config.model.frame_analysis.name] = self.config.model.frame_analysis
-            if hasattr(self.config.model, 'transcription'):
-                self.model_configs[self.config.model.transcription.name] = self.config.model.transcription
+        # Extract model configurations based on config type
+        self._init_model_configs()
         
         # Initialize quota status
         self._quota_status = {}
         
-        # Set up quota status for transcription model if it exists
-        if hasattr(self.config, 'model') and hasattr(self.config.model, 'transcription'):
-            self._quota_status[self.config.model.transcription.name] = {
-                'status': 'available',
-                'error': None,
-                'type': 'gemini-flash',
-                'purpose': 'transcription',
-                'last_error_time': None
-            }
-            
-        # Set up quota status for frame analysis model if it exists
-        if hasattr(self.config, 'model') and hasattr(self.config.model, 'frame_analysis'):
-            self._quota_status[self.config.model.frame_analysis.name] = {
-                'status': 'available',
-                'error': None,
-                'type': 'gemini-flash',
-                'purpose': 'frame_analysis',
-                'last_error_time': None
-            }
+        # Set up quota status for models
+        self._init_quota_status()
         
-        # Initialize rate limiter with configured RPM
-        rpm = None
-        if hasattr(self.config, 'api'):
-            rpm = getattr(self.config.api, 'gemini_rpm_override', None) or getattr(self.config.api, 'gemini_rpm', 10)
-        else:
-            rpm = 10  # Default to 10 RPM if not configured
-            
+        # Get RPM configuration
+        rpm = self._get_rpm_config()
+        
+        # Initialize rate limiter
         self.rate_limiter = RateLimiter(
             max_requests=rpm,
             period=timedelta(minutes=1),
@@ -97,6 +71,134 @@ class ModelManager:
         )
         
         logger.info(f"Initialized ModelManager with Gemini RPM: {rpm} (interval: {60.0/rpm:.2f}s)")
+    
+    def _init_model_configs(self):
+        """Initialize model configurations directly from config"""
+        # Store direct references to model configurations to avoid lookup by name
+        self.video_analysis_config = None
+        self.frame_analysis_config = None
+        self.transcription_config = None
+        
+        # Get direct access to model configurations from config.yaml
+        logger.info("Initializing model configurations from config")
+        
+        # Get video analysis model config
+        if hasattr(self.config, 'get'):
+            # Config is a ConfigManager instance
+            self.video_analysis_config = self._get_model_section('video_analysis')
+            self.frame_analysis_config = self._get_model_section('frame_analysis')
+            self.transcription_config = self._get_model_section('transcription')
+        elif isinstance(self.config, dict) and 'model' in self.config:
+            # Config is a dictionary
+            if 'video_analysis' in self.config['model']:
+                self.video_analysis_config = self.config['model']['video_analysis']
+            if 'frame_analysis' in self.config['model']:
+                self.frame_analysis_config = self.config['model']['frame_analysis']
+            if 'transcription' in self.config['model']:
+                self.transcription_config = self.config['model']['transcription']
+        elif hasattr(self.config, 'model'):
+            # Config is an object with attributes
+            if hasattr(self.config.model, 'video_analysis'):
+                self.video_analysis_config = self.config.model.video_analysis
+            if hasattr(self.config.model, 'frame_analysis'):
+                self.frame_analysis_config = self.config.model.frame_analysis
+            if hasattr(self.config.model, 'transcription'):
+                self.transcription_config = self.config.model.transcription
+                
+        # Log the loaded configs
+        if self.video_analysis_config:
+            logger.info(f"Loaded video_analysis config: {self._get_config_summary(self.video_analysis_config)}")
+            # Add to model_configs for backward compatibility
+            if 'name' in self.video_analysis_config:
+                self.model_configs[self.video_analysis_config['name']] = self.video_analysis_config
+        
+        if self.frame_analysis_config:
+            logger.info(f"Loaded frame_analysis config: {self._get_config_summary(self.frame_analysis_config)}")
+            # Add to model_configs for backward compatibility
+            if 'name' in self.frame_analysis_config:
+                self.model_configs[self.frame_analysis_config['name']] = self.frame_analysis_config
+        
+        if self.transcription_config:
+            logger.info(f"Loaded transcription config: {self._get_config_summary(self.transcription_config)}")
+            # Add to model_configs for backward compatibility
+            if 'name' in self.transcription_config:
+                self.model_configs[self.transcription_config['name']] = self.transcription_config
+        else:
+            logger.error("Failed to load transcription config from config file")
+    
+    def _get_model_section(self, section_name):
+        """Get a model section from config using ConfigManager"""
+        if not hasattr(self.config, 'get'):
+            return None
+            
+        # Extract all relevant config as a dictionary
+        config_dict = {}
+        
+        # Get base properties
+        name = self.config.get('model', section_name, 'name')
+        enabled = self.config.get('model', section_name, 'enabled', default=True)  
+        model_type = self.config.get('model', section_name, 'type')
+        temperature = self.config.get('model', section_name, 'temperature', default=0.7)
+        thinking_budget = self.config.get('model', section_name, 'thinking_budget', default=0)
+        
+        if name:
+            config_dict['name'] = name
+            config_dict['enabled'] = enabled
+            config_dict['type'] = model_type
+            config_dict['temperature'] = temperature
+            config_dict['thinking_budget'] = thinking_budget
+            return config_dict
+        return None
+        
+    def _get_config_summary(self, config):
+        """Get a summary of a config object for logging"""
+        if isinstance(config, dict):
+            return config
+        elif hasattr(config, '__dict__'):
+            return {k: v for k, v in config.__dict__.items() if not k.startswith('_')}
+        else:
+            return str(config)
+                    
+        logger.info(f"Initialized model_configs with {len(self.model_configs)} models: {list(self.model_configs.keys())}")
+    
+    def _init_quota_status(self):
+        """Initialize quota status for models"""
+        # For each model in model_configs, set up quota status
+        for model_name, config in self.model_configs.items():
+            purpose = 'general'
+            if hasattr(config, 'purpose'):
+                purpose = config.purpose
+            elif isinstance(config, dict) and 'purpose' in config:
+                purpose = config['purpose']
+            elif 'transcription' in str(model_name).lower():
+                purpose = 'transcription'
+            elif 'frame' in str(model_name).lower():
+                purpose = 'frame_analysis'
+                
+            self._quota_status[model_name] = {
+                'status': 'available',
+                'error': None,
+                'type': 'gemini-flash',
+                'purpose': purpose,
+                'last_error_time': None
+            }
+    
+    def _get_rpm_config(self):
+        """Get RPM configuration from config"""
+        rpm = 10  # Default RPM
+        
+        # Try attribute access
+        if hasattr(self.config, 'api'):
+            rpm = getattr(self.config.api, 'gemini_rpm_override', None) or getattr(self.config.api, 'gemini_rpm', rpm)
+        # Try dictionary access
+        elif isinstance(self.config, dict) and 'api' in self.config:
+            rpm = self.config['api'].get('gemini_rpm_override') or self.config['api'].get('gemini_rpm', rpm)
+        # Try ConfigManager get
+        elif hasattr(self.config, 'get'):
+            rpm = self.config.get('api', 'gemini_rpm_override', default=None) or self.config.get('api', 'gemini_rpm', default=rpm)
+            
+        return rpm
+
         
     def _on_rate_limit(self):
         """Callback when rate limit is hit"""
@@ -138,67 +240,94 @@ class ModelManager:
         raise QuotaExceededError(f"Max retries ({max_retries}) exceeded for {model_name}")
         
     async def _initialize_model(self, model_name: str) -> Any:
-        """Lazy initialization of models only when needed"""
+        """Lazily initialize models only when they are needed using model_configs"""
         try:
+            # Check if model already exists in cache
+            if model_name in self.models:
+                logger.debug(f"Using cached model: {model_name}")
+                return self.models[model_name]
+            
+            # If model not in model_configs, add it with default settings
             if model_name not in self.model_configs:
-                raise ValueError(f"Unknown model: {model_name}")
-                
+                logger.warning(f"Model {model_name} not found in model_configs, using default settings")
+                self.model_configs[model_name] = {
+                    'name': model_name,
+                    'temperature': 0.7 if 'vision' in model_name or 'pro' in model_name else 0.2
+                }
+            
             config = self.model_configs[model_name]
             
             # Configure the Gemini API
             genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
             
             # Initialize the model with the specified configuration
-            generation_config = {
-                "temperature": config.temperature,
-                "top_p": 1,
-                "top_k": 1,
-            }
+            # Handle both dictionary and attribute style config objects
+            temperature = None
+            thinking_budget = None
             
-            # Add thinking_budget if configured
+            # Try attribute access first
+            if hasattr(config, 'temperature'):
+                temperature = config.temperature
+            elif isinstance(config, dict) and 'temperature' in config:
+                temperature = config['temperature']
+            else:
+                temperature = 0.7
+                
             if hasattr(config, 'thinking_budget'):
-                logger.info(f"Using thinking_budget: {config.thinking_budget} for model {model_name}")
+                thinking_budget = config.thinking_budget
+            elif isinstance(config, dict) and 'thinking_budget' in config:
+                thinking_budget = config['thinking_budget']
+            else:
+                thinking_budget = 0
+                
+            # Log model initialization
+            logger.info(f"Initializing model {model_name} with temperature={temperature}")
             
-            safety_settings = [
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE",
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE",
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE",
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE",
-                },
-            ]
+            # Create the model
+            model = genai.GenerativeModel(model_name=model_name)
+            self.models[model_name] = model
             
-            model = genai.GenerativeModel(
-                model_name=config.name,
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
+            return model
+        except Exception as e:
+            logger.error(f"Failed to initialize model {model_name}: {e}")
+            raise
+
+    async def _initialize_model_directly(self, model_name: str, model_config: dict) -> Any:
+        """Initialize a model directly with the provided configuration"""
+        try:
+            # Check if model already exists in cache
+            if model_name in self.models:
+                logger.debug(f"Using cached model: {model_name}")
+                return self.models[model_name]
+            
+            # Configure the Gemini API
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+            
+            # Initialize the model with the specified configuration
+            temperature = model_config.get('temperature', 0.7)
+            thinking_budget = model_config.get('thinking_budget', 0)
+            
+            # Log model initialization with detailed config
+            logger.info(f"Initializing model {model_name} with config: {model_config}")
+            
+            # Create the model
+            model = genai.GenerativeModel(model_name=model_name)
             
             # Store thinking_budget in model metadata for later use
-            model._thinking_budget = getattr(config, 'thinking_budget', 0)
+            model._thinking_budget = thinking_budget
             
+            # Cache the model for future use
             self.models[model_name] = model
-            logger.info(f"Initialized model {model_name}")
-            return model
             
+            return model
         except Exception as e:
-            logger.error(f"Failed to initialize {model_name}: {str(e)}", exc_info=True)
+            logger.error(f"Failed to initialize model {model_name}: {e}")
             raise
 
     @trace_gemini_call("analyze_video_content")
     async def get_video_analysis_model(self):
         """Get or initialize video analysis model"""
-        model_name = self.settings.model.video_analysis.name
+        model_name = self.config.model.video_analysis.name if hasattr(self.config, 'model') and hasattr(self.config.model, 'video_analysis') else "gemini-pro"
         
         try:
             # Wait for rate limit before configuring
@@ -206,10 +335,13 @@ class ModelManager:
                 raise ValueError(f"Rate limit exceeded for {model_name}")
             
             # Configure Gemini API
-            genai.configure(api_key=self.settings.api.gemini_api_key)
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if hasattr(self.config, 'api') and hasattr(self.config.api, 'gemini_api_key'):
+                gemini_api_key = self.config.api.gemini_api_key
+            genai.configure(api_key=gemini_api_key)
             
             logger.info(f"Initializing video analysis model: {model_name}")
-            model = genai.GenerativeModel(model_name)
+            model = await self._initialize_model(model_name)
             
             # Test the model with a simple prompt
             @trace_gemini_call("test_video_analysis_model")
@@ -235,7 +367,7 @@ class ModelManager:
     @trace_gemini_call("generate_vision_content")
     async def get_vision_model(self):
         """Get or initialize vision model"""
-        model_name = self.settings.model.video_analysis.name  # Use the model from config
+        model_name = self.config.model.video_analysis.name if hasattr(self.config, 'model') and hasattr(self.config.model, 'video_analysis') else "gemini-pro-vision"
         
         try:
             # Wait for rate limit before configuring
@@ -243,10 +375,13 @@ class ModelManager:
                 raise ValueError(f"Rate limit exceeded for {model_name}")
             
             # Configure Gemini API
-            genai.configure(api_key=self.settings.api.gemini_api_key)
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            if hasattr(self.config, 'api') and hasattr(self.config.api, 'gemini_api_key'):
+                gemini_api_key = self.config.api.gemini_api_key
+            genai.configure(api_key=gemini_api_key)
             
             logger.info(f"Initializing vision model: {model_name}")
-            model = genai.GenerativeModel(model_name)
+            model = await self._initialize_model(model_name)
             
             # Test the model with a simple text prompt (can't test vision without an image)
             @trace_gemini_call("test_vision_model")
@@ -272,11 +407,16 @@ class ModelManager:
     @trace_gemini_call("generate_transcript")
     async def get_transcription_model(self) -> Tuple[Any, Dict[str, Any]]:
         """Get the model for audio transcription"""
-        if not self.settings.model.transcription.enabled:
-            raise ValueError("Transcription is not enabled")
-            
-        # Initialize model if not already initialized
-        model = await self._initialize_model(self.settings.model.transcription.name)
+        # Check if transcription config is available
+        if not self.transcription_config or not self.transcription_config.get('name'):
+            raise ValueError("Transcription configuration is missing or invalid. Check config.yaml.")
+        
+        # Get model name directly from stored config
+        model_name = self.transcription_config['name']
+        logger.debug(f"Using transcription model: {model_name}")
+        
+        # Initialize the model
+        model = await self._initialize_model_directly(model_name, self.transcription_config)
         
         model_config = {
             "generation_config": {
@@ -313,17 +453,21 @@ class ModelManager:
         
     def get_transcription_model_instance(self) -> Any:
         """Get just the model instance for transcription (without config) for use with chunking"""
-        if not self.settings.model.transcription.enabled:
-            raise ValueError("Transcription is not enabled")
+        # Check if transcription config is available
+        if not self.transcription_config or not self.transcription_config.get('name'):
+            raise ValueError("Transcription configuration is missing or invalid. Check config.yaml.")
         
-        # Get config for transcription model
-        transcription_config = self.model_configs[self.settings.model.transcription.name]
+        # Get model name directly from stored config
+        model_name = self.transcription_config['name']
+        temperature = self.transcription_config.get('temperature', 0.1)
         
-        # Configure the model with specific settings for transcription
+        logger.debug(f"Creating transcription model instance: {model_name} (temp: {temperature})")
+        
+        # Create the model directly from our stored config
         model = genai.GenerativeModel(
-            model_name=transcription_config.name,
+            model_name=model_name,
             generation_config={
-                "temperature": transcription_config.temperature or 0.1,
+                "temperature": temperature,
                 "candidate_count": 1,
                 "top_p": 0.8,
                 "top_k": 40
@@ -413,12 +557,49 @@ class ModelManager:
                 logger.error(f"Failed to upload audio file: {str(e)}")
                 raise TranscriptionError(f"Failed to upload audio file: {str(e)}")
 
-            # Configure the model with the specific config for transcription
-            transcription_config = self.model_configs[self.settings.model.transcription.name]
-            model = genai.GenerativeModel(
-                model_name=transcription_config.name,
+            # Handle both dictionary-style access and ConfigManager object access
+            model_name = None
+            temperature = 0.1  # Default temperature
+            
+            # Try to get model name using ConfigManager's get method if available
+            if hasattr(self.config, 'get'):
+                model_name = self.config.get('model', 'transcription', 'name')
+                if model_name:
+                    temperature = self.config.get('model', 'transcription', 'temperature', default=0.1)
+            # Try dictionary-style access
+            elif isinstance(self.config, dict) and 'model' in self.config and 'transcription' in self.config['model']:
+                config_transcription = self.config['model']['transcription']
+                model_name = config_transcription.get('name')
+                if model_name:
+                    temperature = config_transcription.get('temperature', 0.1)
+            # Try attribute-style access as a last resort
+            elif hasattr(self.config, 'model') and hasattr(self.config.model, 'transcription'):
+                model_name = getattr(self.config.model.transcription, 'name', None)
+                if model_name:
+                    temperature = getattr(self.config.model.transcription, 'temperature', 0.1)
+            
+            if not model_name:
+                raise ValueError("Transcription model name not found in config")
+                
+            # Get stored model config if available
+            stored_model_config = self.model_configs.get(model_name)
+            
+            if not stored_model_config:
+                # Use defaults if no config found in model_configs
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config={
+                        "temperature": 0.1,
+                        "candidate_count": 1,
+                        "top_p": 0.8,
+                        "top_k": 40
+                    }
+                )
+            else:
+                model = genai.GenerativeModel(
+                    model_name=stored_model_config.name,
                 generation_config={
-                    "temperature": transcription_config.temperature or 0.1,
+                    "temperature": stored_model_config.temperature or 0.1,
                     "candidate_count": 1,
                     "top_p": 0.8,
                     "top_k": 40
