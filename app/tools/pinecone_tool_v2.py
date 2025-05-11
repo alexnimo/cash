@@ -5,65 +5,121 @@ from llama_index.core.tools import BaseTool
 from llama_index.core.tools.types import ToolMetadata
 from llama_index.core.embeddings import BaseEmbedding
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core.ingestion import IngestionPipeline
 from pinecone import Pinecone, ServerlessSpec, Index
 from typing import List, Dict, Any, Optional
-from app.config.agent_config import AGENT_CONFIG
+from app.core.settings import get_settings
 import numpy as np
 import os
 import logging
 import json
 import time
 import hashlib
+import torch
 
 logger = logging.getLogger(__name__)
+
+logging.getLogger("sentence_transformers").setLevel(logging.DEBUG)
+logging.getLogger("huggingface_hub").setLevel(logging.DEBUG)
+logging.getLogger("transformers").setLevel(logging.DEBUG)
 
 class PineconeAdvancedToolSpec(BaseTool):
     """Advanced Pinecone tool for vector operations"""
     def __init__(self):
         super().__init__()
         
-        # Get configurations
-        self.pinecone_config = AGENT_CONFIG['pinecone']
-        self.embedding_config = AGENT_CONFIG['embedding']
+        settings = get_settings()
         
-        # Try to get API key from environment first, then config
-        api_key = os.getenv("PINECONE_API_KEY")
-        if not api_key:
-            logger.warning("PINECONE_API_KEY not found in environment variables, checking config...")
-            if 'api_key' not in self.pinecone_config:
-                raise ValueError("Pinecone API key not found in environment variables or config")
-            api_key = self.pinecone_config['api_key']
+        # Ensure agent-specific configurations are present
+        if not settings.agents:
+            raise ValueError("Agent configuration (settings.agents) not found in settings.")
+        if not settings.agents.embedding:
+            raise ValueError("Agent embedding configuration (settings.agents.embedding) not found in settings.")
+        if not settings.agents.pinecone:
+            raise ValueError("Agent Pinecone configuration (settings.agents.pinecone) not found in settings.")
+
+        embedding_model_settings = settings.agents.embedding
+        self.agent_pinecone_config = settings.agents.pinecone # Store for use in other methods
         
-        self.pc = Pinecone(api_key=api_key)
+        # Pinecone API Key: ENV first, then global vector_store config if available
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        if not pinecone_api_key:
+            logger.warning("PINECONE_API_KEY not found in environment variables, checking global vector_store.config settings...")
+            if settings.vector_store and settings.vector_store.config:
+                 pinecone_api_key = settings.vector_store.config.get('api_key')
+            if not pinecone_api_key:
+                raise ValueError("Pinecone API key not found in environment variables or global vector_store.config settings")
         
-        # Set properties
-        self.index_name = self.pinecone_config['index_name']
-        self.dimension = self.embedding_config.get('dimension', 768)
-        self.metric = self.embedding_config['metric']
+        self.pc = Pinecone(api_key=pinecone_api_key)
         
-        # Initialize embedding model
-        self.embed_model = HuggingFaceEmbedding(
-            model_name=self.embedding_config['model'],
-            trust_remote_code=True
-        )
+        self.index_name = self.agent_pinecone_config.index_name
+        if not self.index_name:
+            raise ValueError("Pinecone 'index_name' not found in settings.agents.pinecone")
         
-        # Ensure index has correct dimension
+        # Embedding Configuration from settings.agents.embedding
+        self.dimension = embedding_model_settings.dimension
+        if self.dimension is None:
+            logger.warning("Embedding dimension not specified in settings.agents.embedding, defaulting to 768 for Nomic.")
+            self.dimension = 768
+
+        self.metric = embedding_model_settings.metric
+        if not self.metric:
+            logger.warning("Embedding 'metric' not found in settings.agents.embedding, defaulting to 'cosine'.")
+            self.metric = 'cosine'
+        
+        model_name_to_load = embedding_model_settings.model
+        if not model_name_to_load:
+            raise ValueError("Embedding model name (settings.agents.embedding.model) not found.")
+
+        logger.info(f"Attempting to load embedding model: {model_name_to_load}")
+        logger.info(f"PyTorch version: {torch.__version__}")
+        logger.debug(f"OMP_NUM_THREADS: {os.getenv('OMP_NUM_THREADS')}")
+
+        try:
+            self.embed_model = HuggingFaceEmbedding(
+                model_name=model_name_to_load,
+                trust_remote_code=True
+            )
+            logger.info(f"Successfully loaded embedding model: {model_name_to_load}")
+        except Exception as e:
+            logger.error(f"Failed to load embedding model '{model_name_to_load}': {e}", exc_info=True)
+            raise
+        finally:
+            logger.debug("Embedding model loading attempt finished.")
+        
         self._ensure_index_dimension()
-        
         self.index = self._initialize_index()
         self.pipeline = self._initialize_pipeline()
 
-    def _validate_env_vars(self):
-        """Validate required environment variables"""
-        required_vars = ["PINECONE_API_KEY"]
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+        logger.info(f"PineconeAdvancedToolSpec initialized successfully with index: {self.index_name}")
+        logger.info(f"Embedding model {model_name_to_load} loaded.")
+
+    def get_embedding_model(self) -> BaseEmbedding:
+        """Returns the initialized embedding model."""
+        if not hasattr(self, 'embed_model') or self.embed_model is None:
+            logger.error("Embedding model not initialized before get_embedding_model call.")
+            # Potentially re-initialize or raise a more specific error
+            # For now, trying to re-initialize if settings are available
+            if hasattr(self, 'embedding_model_settings') and self.embedding_model_settings:
+                model_name_to_load = self.embedding_model_settings.model
+                try:
+                    self.embed_model = HuggingFaceEmbedding(model_name=model_name_to_load, trust_remote_code=True)
+                    logger.info(f"Re-initialized embedding model: {model_name_to_load}")
+                except Exception as e:
+                    logger.error(f"Failed to re-initialize embedding model {model_name_to_load}: {e}")
+                    raise RuntimeError("Embedding model could not be initialized or re-initialized.") from e
+            else:
+                 raise AttributeError("Embedding model (self.embed_model) is not available and settings for re-initialization are missing.")
+        return self.embed_model
+
+    metadata = ToolMetadata(
+        name="pinecone_advanced_tool",
+        description="Tool for advanced Pinecone operations: index management, upserting, querying, and processing documents."
+    )
 
     def _initialize_index(self) -> Index:
-        """Initialize or get existing Pinecone index"""
+        """Initialize or get the Pinecone index."""
         try:
-            # Check if index exists
             if not self.index_exists(self.index_name):
                 logger.info(f"Creating new index {self.index_name}")
                 self.pc.create_index(
@@ -71,33 +127,30 @@ class PineconeAdvancedToolSpec(BaseTool):
                     dimension=self.dimension,
                     metric=self.metric,
                     spec=ServerlessSpec(
-                        cloud=self.pinecone_config['cloud'],
-                        region=self.pinecone_config['region']
+                        cloud=self.agent_pinecone_config.cloud if self.agent_pinecone_config.cloud else 'aws',
+                        region=self.agent_pinecone_config.region if self.agent_pinecone_config.region else 'us-west-2'
                     ),
                     deletion_protection='enabled'
                 )
-            
+                while not self._is_index_ready(self.index_name):
+                    time.sleep(1)
             return self.pc.Index(self.index_name)
         except Exception as e:
-            logger.error(f"Error initializing index: {str(e)}")
+            logger.error(f"Error initializing index: {str(e)}", exc_info=True)
             raise
 
-    def _initialize_pipeline(self):
-        """Initialize ingestion pipeline"""
-        from llama_index.core.ingestion import IngestionPipeline
+    def _initialize_pipeline(self) -> IngestionPipeline:
+        """Initialize the ingestion pipeline"""
         from llama_index.core.node_parser import SemanticSplitterNodeParser
         from llama_index.vector_stores.pinecone import PineconeVectorStore
         import importlib
 
-        # Check if llama_index.vector_stores.pinecone has get_pinecone_client
         pinecone_vectorstore_module = importlib.import_module('llama_index.vector_stores.pinecone')
         if hasattr(pinecone_vectorstore_module, 'get_pinecone_client'):
-            # For newer versions of LlamaIndex that need a custom init for Pinecone
             try:
-                # Initialize vector store
                 vector_store = PineconeVectorStore(
                     index_name=self.index_name,
-                    environment=self.pinecone_config.get('environment', None),
+                    environment=self.agent_pinecone_config.environment,
                     metadata_filters=True,
                     pinecone_kwargs={"api_key": self.pc.api_key},
                     embedding_model=self.embed_model
@@ -105,303 +158,253 @@ class PineconeAdvancedToolSpec(BaseTool):
                 logger.info("Initialized PineconeVectorStore with newer method")
             except Exception as e:
                 logger.warning(f"Could not initialize PineconeVectorStore with newer method: {e}")
-                # Try the original approach
                 vector_store = PineconeVectorStore(
                     pinecone_index=self.index,
                     embedding_model=self.embed_model
                 )
+                logger.info("Initialized PineconeVectorStore with original method as fallback")
         else:
-            # Initialize vector store with original approach
             vector_store = PineconeVectorStore(
                 pinecone_index=self.index,
                 embedding_model=self.embed_model
             )
+            logger.info("Initialized PineconeVectorStore with original method")
         
-        # Initialize pipeline with node parser and vector store
         return IngestionPipeline(
             transformations=[
                 SemanticSplitterNodeParser(
                     buffer_size=1,
                     breakpoint_percentile_threshold=95,
-                    embed_model=self.embed_model
+                    embed_model=self.embed_model,
                 ),
+                self.embed_model, # Add embed_model for embedding nodes
             ],
-            vector_store=vector_store
+            vector_store=vector_store,
         )
 
     def _ensure_index_dimension(self):
         """Ensure index exists with correct dimension"""
         try:
-            target_dimension = self.embedding_config.get('dimension')
+            target_dimension = self.dimension
             
             if not target_dimension:
                 logger.error("No dimension specified in embedding config")
-                raise ValueError("No dimension specified in embedding config")
+                raise ValueError("Target dimension for Pinecone index not specified.")
             
-            # Check if index exists
-            try:
-                index_description = self.pc.describe_index(self.index_name)
-                
-                # Handle dimension access based on SDK version
+            if not self.index_exists(self.index_name):
+                logger.info(f"Creating new index {self.index_name} because it does not exist.")
                 try:
-                    # Try accessing as an attribute (newer SDK)
-                    current_dimension = getattr(index_description, "dimension", None)
-                except (AttributeError, TypeError):
-                    # Try accessing as a dictionary (older SDK)
-                    current_dimension = index_description.get("dimension") if isinstance(index_description, dict) else None
-                    
-                # If we still couldn't get dimension, try alternate attribute names
-                if current_dimension is None:
-                    # Try other possible attribute names
-                    for attr in ["dimension", "dimensions", "vector_dimension", "vector_dimensions"]:
-                        current_dimension = getattr(index_description, attr, None)
-                        if current_dimension is not None:
-                            break
-                
-                if current_dimension is None:
-                    logger.warning(f"Could not determine dimension of existing index {self.index_name}")
-                    # Continue with creation to be safe
-                    raise ValueError(f"Could not determine dimension of existing index {self.index_name}")
-                
-                if current_dimension == target_dimension:
-                    logger.info(f"Using existing index {self.index_name} with correct dimension {target_dimension}")
-                    return
-                else:
-                    logger.warning(f"Index dimension mismatch. Current: {current_dimension}, Target: {target_dimension}")
-                    logger.warning("Cannot modify existing index dimensions. Please manually delete the index if you need to change its dimension.")
-                    raise ValueError(f"Index {self.index_name} exists with incorrect dimension {current_dimension} (expected {target_dimension})")
-            except Exception as e:
-                if "not found" in str(e).lower():
-                    # Index doesn't exist, create it
-                    logger.info(f"Creating new index {self.index_name}")
-                    try:
-                        self.pc.create_index(
-                            name=self.index_name,
-                            dimension=target_dimension,
-                            metric=self.metric,
-                            spec=ServerlessSpec(
-                                cloud=self.pinecone_config.get('cloud', 'aws'),
-                                region=self.pinecone_config.get('region', 'us-west-2')
-                            ),
-                            deletion_protection='enabled'
-                        )
-                        # Wait for index to be ready
-                        while not self._is_index_ready(self.index_name):
-                            time.sleep(1)
-                        logger.info(f"Created new Pinecone index: {self.index_name} with dimension {target_dimension}")
-                    except Exception as create_error:
-                        if "ALREADY_EXISTS" in str(create_error):
-                            logger.info(f"Index {self.index_name} was created by another process, using existing index")
-                            return
-                        logger.error(f"Error creating index: {str(create_error)}")
+                    self.pc.create_index(
+                        name=self.index_name,
+                        dimension=target_dimension,
+                        metric=self.metric,
+                        spec=ServerlessSpec(
+                            cloud=self.agent_pinecone_config.cloud if self.agent_pinecone_config.cloud else 'aws',
+                            region=self.agent_pinecone_config.region if self.agent_pinecone_config.region else 'us-west-2'
+                        ),
+                        deletion_protection='enabled'
+                    )
+                    while not self._is_index_ready(self.index_name):
+                        time.sleep(1)
+                    logger.info(f"Created new Pinecone index: {self.index_name} with dimension {target_dimension}")
+                except Exception as create_error:
+                    if "ALREADY_EXISTS" in str(create_error):
+                        logger.info(f"Index {self.index_name} was created by another process, using existing index")
+                    else:
+                        logger.error(f"Error creating index: {str(create_error)}", exc_info=True)
                         raise
-                else:
-                    logger.error(f"Error checking index: {str(e)}")
-                    raise
+                # After creation or if it was created by another process, re-check description
+                # to confirm dimension if possible, or proceed if creation was successful.
+
+            # Index exists or was just created, now check its dimension
+            index_description = self.pc.describe_index(self.index_name)
+            current_dimension = None
+            try:
+                current_dimension = getattr(index_description, "dimension", None)
+            except (AttributeError, TypeError):
+                current_dimension = index_description.get("dimension") if isinstance(index_description, dict) else None
                     
+            if current_dimension is None:
+                for attr in ["dimension", "dimensions", "vector_dimension", "vector_dimensions"]:
+                    current_dimension = getattr(index_description, attr, None)
+                    if current_dimension is not None:
+                        break
+                
+            if current_dimension is None:
+                logger.warning(f"Could not determine dimension of existing index {self.index_name} after creation/check. Assuming correct if creation did not error.")
+                # If creation didn't error, and we can't fetch dimension, we might have to assume it's okay.
+                # Or, strict mode: raise ValueError(f"Could not determine dimension of existing index {self.index_name}")
+                return # Proceed cautiously
+                
+            if current_dimension == target_dimension:
+                logger.info(f"Using existing index {self.index_name} with correct dimension {target_dimension}")
+                return
+            else:
+                logger.warning(f"Index dimension mismatch. Current: {current_dimension}, Target: {target_dimension}")
+                logger.warning("Cannot modify existing index dimensions. Please manually delete the index if you need to change its dimension.")
+                raise ValueError(f"Index {self.index_name} exists with incorrect dimension {current_dimension} (expected {target_dimension})")
         except Exception as e:
-            logger.error(f"Error ensuring index dimension: {str(e)}")
+            logger.error(f"Error ensuring index dimension: {str(e)}", exc_info=True)
             raise
 
     def _is_index_ready(self, index_name: str) -> bool:
-        """Check if an index is ready and available"""
+        """Check if the Pinecone index is ready"""
         try:
             description = self.pc.describe_index(index_name)
-            
-            # Try to check ready status in different ways based on SDK version
-            # 1. Try status.ready (newer SDK)
             try:
-                if hasattr(description, 'status') and hasattr(description.status, 'ready'):
-                    return description.status.ready
-            except (AttributeError, TypeError):
-                pass
-                
-            # 2. Try direct ready attribute
-            if hasattr(description, 'ready'):
-                return description.ready
-                
-            # 3. Try dictionary access (older SDK)
-            if isinstance(description, dict):
-                if 'status' in description and 'ready' in description['status']:
-                    return description['status']['ready']
-                if 'ready' in description:
-                    return description['ready']
-            
-            # 4. If we can get the description at all and can't determine ready state,
-            # assume it's ready (safer option)
-            logger.warning(f"Could not determine ready state for index {index_name}, assuming ready")
-            return True
-            
+                return description.status.ready
+            except AttributeError:
+                if isinstance(description, dict):
+                    return description.get("status", {}).get("ready", False)
+                logger.warning(f"Could not determine ready state for index {index_name} via status.ready or dict access, assuming ready if describe_index succeeded.")
+                return True # If describe_index works and we can't find specific ready status, assume it might be ready.
         except Exception as e:
-            logger.warning(f"Error checking if index is ready: {str(e)}")
+            # If describe_index fails with 'not found', it's definitely not ready.
+            if "not found" in str(e).lower():
+                return False
+            logger.warning(f"Error checking if index is ready for '{index_name}': {str(e)}. Assuming not ready.")
             return False
 
     def index_exists(self, index_name: str) -> bool:
         """Check if a Pinecone index exists"""
         try:
-            return index_name in self.pc.list_indexes().names()
+            self.pc.describe_index(index_name)
+            return True
         except Exception as e:
-            logger.error(f"Error checking index existence: {str(e)}")
+            if "not found" in str(e).lower():
+                return False
+            logger.warning(f"Error checking if index '{index_name}' exists: {e}. Assuming it does not.")
             return False
 
-    def create_index(self, name: str, dimension: int = 768, metric: str = "cosine") -> bool:
-        """Create a new Pinecone index"""
+    def create_pinecone_index_tool(self, name: str, dimension: int, metric: str) -> str:
+        """Tool to create a Pinecone index"""
         try:
             if self.index_exists(name):
-                logger.warning(f"Index {name} already exists")
-                return False
-                
+                return f"Index {name} already exists."
             self.pc.create_index(
                 name=name,
                 dimension=dimension,
                 metric=metric,
                 spec=ServerlessSpec(
-                    cloud=self.pinecone_config['cloud'],
-                    region=self.pinecone_config['region']
+                    cloud=self.agent_pinecone_config.cloud if self.agent_pinecone_config.cloud else 'aws',
+                    region=self.agent_pinecone_config.region if self.agent_pinecone_config.region else 'us-west-2'
                 ),
                 deletion_protection='enabled'
             )
-            logger.info(f"Successfully created index {name}")
-            return True
+            while not self._is_index_ready(name):
+                time.sleep(1)
+            return f"Index {name} created successfully."
         except Exception as e:
-            logger.error(f"Error creating index: {str(e)}")
-            return False
+            return f"Error creating index {name}: {str(e)}"
 
-    def delete_index(self, name: str) -> bool:
-        """Delete a Pinecone index"""
+    def delete_pinecone_index_tool(self, name: str) -> str:
+        """Tool to delete a Pinecone index"""
         try:
             if not self.index_exists(name):
-                logger.warning(f"Index {name} does not exist")
-                return False
-                
+                return f"Index {name} does not exist."
             self.pc.delete_index(name)
-            logger.info(f"Successfully deleted index {name}")
-            return True
+            return f"Index {name} deleted successfully."
         except Exception as e:
-            logger.error(f"Error deleting index: {str(e)}")
-            return False
+            return f"Error deleting index {name}: {str(e)}"
 
-    def get_index_stats(self, name: str) -> Dict[str, Any]:
-        """Get statistics for a Pinecone index"""
+    def get_pinecone_index_stats_tool(self, name: str) -> Dict[str, Any]:
+        """Tool to get stats for a Pinecone index"""
         try:
             if not self.index_exists(name):
-                logger.warning(f"Index {name} does not exist")
-                return {}
-                
+                return {"error": f"Index {name} does not exist."}
             index = self.pc.Index(name)
             stats = index.describe_index_stats()
-            
-            # Handle different response structures based on Pinecone SDK version
-            # New SDK returns an object, old SDK returned a dict
             try:
-                # Try to access stats.dimension (newer SDK)
                 return {
                     "dimension": getattr(stats, "dimension", 0),
                     "total_vector_count": getattr(stats, "total_vector_count", 0),
                     "namespaces": getattr(stats, "namespaces", {})
                 }
             except AttributeError:
-                # Try to access as dict (older SDK)
                 if isinstance(stats, dict):
                     return {
                         "dimension": stats.get("dimension", 0),
                         "total_vector_count": stats.get("total_vector_count", 0),
                         "namespaces": stats.get("namespaces", {})
                     }
-                    
-                # If all else fails, return a minimal structure
                 return {
                     "dimension": 0,
                     "total_vector_count": 0,
-                    "namespaces": {}
+                    "namespaces": {},
+                    "warning": "Could not parse stats object properly."
                 }
         except Exception as e:
-            logger.error(f"Error getting index stats: {str(e)}")
-            return {}
+            return {"error": f"Error getting stats for index {name}: {str(e)}"}
 
     async def process_documents(self, documents: List[Document]) -> bool:
         """Process and upsert documents using the ingestion pipeline"""
         try:
-            # Try using the pipeline first
             try:
                 logger.info(f"Processing {len(documents)} documents using ingestion pipeline")
-                # Run pipeline on documents and get nodes
                 nodes = self.pipeline.run(documents=documents)
                 logger.info(f"Pipeline successfully processed {len(nodes)} nodes")
                 return True
             except Exception as pipeline_error:
-                # If pipeline fails, use direct upsert as fallback
-                logger.warning(f"Pipeline processing failed: {pipeline_error}. Falling back to direct upsert.")
+                logger.warning(f"Pipeline processing failed: {pipeline_error}. Falling back to direct upsert.", exc_info=True)
                 
-                # Process documents directly
-                nodes = []
+                nodes_to_upsert = []
                 for doc in documents:
-                    nodes.append(doc)
+                    if isinstance(doc, Document):
+                        # If it's a LlamaIndex Document, we might need to parse it first if not already nodes
+                        # For simplicity here, assuming documents are either pre-parsed Nodes or basic Documents that can be treated as Nodes
+                        nodes_to_upsert.append(Node(text=doc.text, metadata=doc.metadata or {}))
+                    elif isinstance(doc, Node):
+                        nodes_to_upsert.append(doc)
+                    else:
+                        logger.warning(f"Skipping unsupported document type: {type(doc)}")
+                        continue
                 
-                # Get embeddings and metadata for each node
                 vectors = []
-                
-                for i, node in enumerate(nodes):
-                    # Get the text content - handle both Document and Node objects
-                    text = node.text if hasattr(node, 'text') else str(node)
-                    
-                    # Get embedding
+                for i, node in enumerate(nodes_to_upsert):
+                    text = node.get_content() # Changed from node.text
                     embedding = await self.embed_model._aget_text_embedding(text)
                     
-                    # Get metadata - handle both Document and Node objects
-                    if hasattr(node, 'metadata') and node.metadata:
-                        node_metadata = {
-                            'text': text,
-                            **node.metadata
-                        }
-                    else:
-                        node_metadata = {'text': text}
+                    node_metadata = node.metadata or {}
+                    node_metadata['text'] = text # Ensure text is in metadata for retrieval
                     
-                    # Create a stable, unique ID based on content and metadata
                     content_hash = hashlib.md5(text.encode()).hexdigest()
                     metadata_str = json.dumps(sorted(node_metadata.items()))
                     metadata_hash = hashlib.md5(metadata_str.encode()).hexdigest()
-                    stable_id = f"{content_hash}_{metadata_hash}"
-                    node_metadata['doc_id'] = stable_id
+                    stable_id = f"{content_hash}-{metadata_hash}"
+                    node_metadata['doc_id'] = stable_id # Ensure doc_id is set for potential use
                     
-                    # Create vector tuple (id, values, metadata)
                     vectors.append((stable_id, embedding, node_metadata))
                 
-                # Log vectors being upserted
-                logger.info(f"Upserting {len(vectors)} vectors to Pinecone directly")
-                for vid, _, meta in vectors[:3]:  # Log only first 3 vectors to avoid excessive logging
-                    logger.info(f"Vector ID: {vid}, Metadata keys: {list(meta.keys())}")
+                if not vectors:
+                    logger.info("No vectors to upsert after fallback processing.")
+                    return True # No error, but nothing was upserted
+
+                logger.info(f"Upserting {len(vectors)} vectors to Pinecone directly (fallback)")
+                for vid, _, meta in vectors[:3]:
+                    logger.info(f"Fallback Vector ID: {vid}, Metadata keys: {list(meta.keys())}")
                 
                 try:
-                    # Try upsert using the Pinecone SDK v6+ syntax
-                    logger.info("Attempting upsert with Pinecone v6+ SDK")
                     self.index.upsert(vectors=vectors)
                 except Exception as v6_error:
-                    logger.warning(f"Upsert with v6+ SDK failed: {v6_error}. Trying v5 syntax.")
+                    logger.warning(f"Upsert with Pinecone v6+ SDK failed during fallback: {v6_error}. Trying v5 syntax.", exc_info=True)
                     try:
-                        # Try older Pinecone SDK v5 syntax
                         self.index.upsert(vectors=[(vid, vec, meta) for vid, vec, meta in vectors])
                     except Exception as v5_error:
-                        logger.error(f"All upsert attempts failed: {v5_error}")
-                        raise
-                
-                logger.info(f"Successfully processed and stored {len(nodes)} nodes directly")
+                        logger.error(f"All upsert attempts failed during fallback: {v5_error}", exc_info=True)
+                        return False
+                logger.info("Fallback direct upsert completed.")
                 return True
-                
+
         except Exception as e:
-            logger.error(f"Error processing documents: {str(e)}")
+            logger.error(f"Error processing documents: {str(e)}", exc_info=True)
             return False
 
     async def query_similar(self, query_text: str, top_k: int = 5, filter: Optional[Dict] = None) -> List[Dict]:
         """Query similar documents"""
         try:
-            # Get query embedding
             query_embedding = await self.embed_model._aget_text_embedding(query_text)
-            
-            # Try different query approaches for compatibility with different Pinecone SDK versions
             try:
                 logger.info(f"Querying Pinecone with top_k={top_k} using v6+ SDK approach")
-                # Try newer SDK query approach
                 query_response = self.index.query(
                     vector=query_embedding,
                     top_k=top_k,
@@ -409,25 +412,19 @@ class PineconeAdvancedToolSpec(BaseTool):
                     include_metadata=True
                 )
                 
-                # Format results based on response structure
                 formatted_results = []
-                
-                # Check if response has 'matches' attribute (newer SDK)
                 if hasattr(query_response, 'matches'):
                     for match in query_response.matches:
                         try:
-                            # Try accessing as object properties first
                             formatted_results.append({
                                 'score': getattr(match, 'score', 0.0),
                                 'metadata': getattr(match, 'metadata', {})
                             })
                         except AttributeError:
-                            # Try dict access if object access fails
                             formatted_results.append({
                                 'score': match.get('score', 0.0),
                                 'metadata': match.get('metadata', {})
                             })
-                # Check if response is dict with 'matches' key (older SDK)
                 elif isinstance(query_response, dict) and 'matches' in query_response:
                     for match in query_response['matches']:
                         formatted_results.append({
@@ -435,9 +432,7 @@ class PineconeAdvancedToolSpec(BaseTool):
                             'metadata': match.get('metadata', {})
                         })
                 else:
-                    # Handle case where response structure is unknown
                     logger.warning(f"Unexpected query response structure: {type(query_response)}")
-                    # Try to extract something useful
                     if isinstance(query_response, list):
                         for item in query_response:
                             if isinstance(item, dict):
@@ -445,86 +440,54 @@ class PineconeAdvancedToolSpec(BaseTool):
                                     'score': item.get('score', 0.0),
                                     'metadata': item.get('metadata', {})
                                 })
-                
-                logger.info(f"Query returned {len(formatted_results)} results")
-                    
+                return formatted_results
             except Exception as e:
-                logger.warning(f"Error with v6+ query approach: {e}. Trying v5 approach...")
+                logger.warning(f"Error with v6+ query approach: {e}. Trying v5 approach...", exc_info=True)
                 try:
-                    # Try older SDK query approach
                     query_response = self.index.query(
-                        queries=[query_embedding],  # Array instead of single vector
+                        queries=[query_embedding], # Older SDKs might expect a list of queries
                         top_k=top_k,
                         include_metadata=True,
                         filter=filter
                     )
-                    
                     formatted_results = []
-                    # Handle different response structures
-                    if isinstance(query_response, dict) and 'results' in query_response:
+                    if isinstance(query_response, dict) and 'results' in query_response and query_response['results']:
+                         # Assuming the first result in the list corresponds to the single query
                         for match in query_response['results'][0]['matches']:
                             formatted_results.append({
                                 'score': match.get('score', 0.0),
                                 'metadata': match.get('metadata', {})
                             })
-                    else:
-                        logger.warning(f"Unexpected query response structure from v5 approach")
-                        return []
-                        
+                    elif isinstance(query_response, dict) and 'matches' in query_response: # Some older versions might return matches directly
+                        for match in query_response['matches']:
+                            formatted_results.append({
+                                'score': match.get('score', 0.0),
+                                'metadata': match.get('metadata', {})
+                            })
+                    return formatted_results
                 except Exception as e2:
-                    logger.error(f"All query attempts failed: {e2}")
+                    logger.error(f"Query failed with both v6+ and v5 approaches: {e2}", exc_info=True)
                     return []
-            
-            return formatted_results
         except Exception as e:
-            logger.error(f"Error querying similar documents: {str(e)}")
+            logger.error(f"Error querying similar documents: {str(e)}", exc_info=True)
             return []
 
-    def get_embedding_model(self) -> HuggingFaceEmbedding:
-        """Get the embedding model"""
-        return self.embed_model
-
-    @property
-    def metadata(self) -> ToolMetadata:
-        """Get tool metadata"""
-        return ToolMetadata(
-            name="pinecone_advanced_tool",
-            description="Advanced Pinecone tool for vector database operations",
-            fn_schema={
-                "type": "function",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "description": "Operation to perform (upsert, query, delete)",
-                    },
-                    "data": {
-                        "type": "object",
-                        "description": "Data for the operation",
-                    }
-                },
-                "required": ["operation", "data"]
-            }
-        )
-
-    async def __call__(self, operation: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute tool with given operation and data"""
-        try:
-            if operation == "upsert":
-                return await self.process_documents(data.get("documents", []))
-            elif operation == "query":
-                return await self.query_similar(data.get("query_text", ""), data.get("top_k", 5), data.get("filter"))
-            elif operation == "delete":
-                return {"result": "Not implemented"}
-            elif operation == "index_exists":
-                return {"result": self.index_exists(data.get("index_name", ""))}
-            elif operation == "create_index":
-                return {"result": self.create_index(data.get("name", ""), data.get("dimension", 768), data.get("metric", "cosine"))}
-            elif operation == "delete_index":
-                return {"result": self.delete_index(data.get("name", ""))}
-            elif operation == "get_index_stats":
-                return {"result": self.get_index_stats(data.get("name", ""))}
-            else:
-                raise ValueError(f"Unknown operation: {operation}")
-        except Exception as e:
-            logger.error(f"Error in PineconeAdvancedToolSpec: {str(e)}")
-            raise
+    def __call__(self, action: str, **kwargs: Any) -> Any:
+        """Allows calling specific tool methods by action name."""
+        if action == "create_index":
+            return self.create_pinecone_index_tool(kwargs['name'], kwargs['dimension'], kwargs['metric'])
+        elif action == "delete_index":
+            return self.delete_pinecone_index_tool(kwargs['name'])
+        elif action == "get_index_stats":
+            return self.get_pinecone_index_stats_tool(kwargs['name'])
+        elif action == "process_documents":
+            # This is async, direct call might not be suitable here without await
+            # Consider how to handle async methods if called synchronously.
+            # For now, returning a message or raising error.
+            # asyncio.run(self.process_documents(kwargs['documents']))
+            return "process_documents is async; call via await self.process_documents(...)"
+        elif action == "query_similar":
+            # asyncio.run(self.query_similar(kwargs['query_text'], kwargs.get('top_k', 5), kwargs.get('filter')))
+            return "query_similar is async; call via await self.query_similar(...)"
+        else:
+            return f"Action '{action}' not recognized."
