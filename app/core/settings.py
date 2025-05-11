@@ -98,19 +98,36 @@ class LLMConfig(BaseModel):
     type: str = Field(default="gemini")
     name: str = Field(default="gemini-pro")
     temperature: float = Field(default=0.7)
-
-class PromptConfig(BaseModel):
-    content: str = Field(default="")
+    max_tokens: Optional[int] = None  # Add if needed
+    # Add other relevant LLM settings if they exist in your config under agents.llm
 
 class AgentPrompts(BaseModel):
-    technical_analysis: PromptConfig = Field(default_factory=lambda: PromptConfig())
-    
-    class Config:
-        arbitrary_types_allowed = True
+    system_prompt: str = "You are a helpful AI assistant."
+    user_prompt_template: str = "{input}"
+    # Add other prompt fields if they exist
+
+class AgentEmbeddingConfig(BaseModel):
+    provider: str
+    model: str 
+    dimension: int
+    metric: str
+    metadata_fields: Optional[List[str]] = None
+
+class AgentPineconeConfig(BaseModel):
+    index_name: str
+    cloud: str
+    region: str
+    environment: Optional[str] = None 
 
 class AgentConfig(BaseModel):
+    enabled: bool = True 
+    agent_debug: bool = True 
+    debug_dir: str = "debug" 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     prompts: AgentPrompts = Field(default_factory=AgentPrompts)
+    embedding: AgentEmbeddingConfig 
+    pinecone: AgentPineconeConfig  
+    rag: Optional[Dict[str, Any]] = None 
 
 class NotionConfig(BaseModel):
     api_key: str
@@ -127,7 +144,7 @@ class TranscriptGenerationSettings(BaseModel):
     max_chunk_duration_minutes: int = Field(default=30)  # Default to 30 minutes
 
 class Settings(BaseModel):
-    app_name: str
+    app_name: str = "Video Analyzer"
     model: ModelConfig
     vector_store: VectorStoreConfig
     storage: StorageConfig
