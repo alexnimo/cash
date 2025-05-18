@@ -71,21 +71,26 @@ class PineconeAdvancedToolSpec(BaseTool):
         if not model_name_to_load:
             raise ValueError("Embedding model name (settings.agents.embedding.model) not found.")
 
-        logger.info(f"Attempting to load embedding model: {model_name_to_load}")
+        logger.info(f"Initializing embedding model access: {model_name_to_load}")
         logger.info(f"PyTorch version: {torch.__version__}")
         logger.debug(f"OMP_NUM_THREADS: {os.getenv('OMP_NUM_THREADS')}")
 
         try:
-            self.embed_model = HuggingFaceEmbedding(
-                model_name=model_name_to_load,
-                trust_remote_code=True
-            )
-            logger.info(f"Successfully loaded embedding model: {model_name_to_load}")
+            # Use the singleton embedding service instead of creating a new instance
+            from app.services.embedding_service import EmbeddingService
+            
+            # Get the singleton instance
+            embedding_service = EmbeddingService.get_instance()
+            
+            # Get the embedding model (will be initialized if not already done)
+            self.embed_model = embedding_service.get_embedding_model(model_name=model_name_to_load)
+            
+            logger.info(f"Successfully accessed embedding model: {model_name_to_load}")
         except Exception as e:
-            logger.error(f"Failed to load embedding model '{model_name_to_load}': {e}", exc_info=True)
+            logger.error(f"Failed to access embedding model '{model_name_to_load}': {e}", exc_info=True)
             raise
         finally:
-            logger.debug("Embedding model loading attempt finished.")
+            logger.debug("Embedding model access attempt finished.")
         
         self._ensure_index_dimension()
         self.index = self._initialize_index()

@@ -585,9 +585,10 @@ class RAGAgent:
                 logger.warning("No stocks found in section, skipping")
                 return None
                 
-            # Generate embedding
-            embedding_model = self.pinecone_tool.get_embedding_model()
-            new_embedding = await embedding_model._aget_text_embedding(section_text)
+            # Generate embedding using the singleton embedding service
+            from app.services.embedding_service import EmbeddingService
+            embedding_service = EmbeddingService.get_instance()
+            new_embedding = await embedding_service.get_embedding(section_text)
             
             # First, pull all existing data related to these stocks from the vector store
             all_related_data = []
@@ -623,7 +624,9 @@ class RAGAgent:
             if similar_docs:
                 existing_doc = similar_docs[0]
                 existing_text = self._prepare_section_text(existing_doc)
-                existing_embedding = await embedding_model._aget_text_embedding(existing_text)
+                from app.services.embedding_service import EmbeddingService
+                embedding_service = EmbeddingService.get_instance()
+                existing_embedding = await embedding_service.get_embedding(existing_text)
                 
                 # Calculate similarity
                 similarity = cosine_similarity(new_embedding, existing_embedding)
