@@ -329,55 +329,99 @@ class NotionTool:
             logger.error(f"Error getting tickers from Notion: {str(e)}", exc_info=True)
             raise
 
-    async def _upload_to_freeimage(self, file_path: str) -> Optional[str]:
-        """Upload a file to freeimage.host and return the public URL."""
+    async def _upload_to_notion(self, file_path: str) -> Optional[dict]:
+        """Upload a file directly to Notion and return the file object.
+        
+        This uses Notion's direct file upload API which follows a three-step process:
+        1. Create a file upload object
+        2. Upload the actual file content
+        3. Return the file object for attachment to a page
+        """
         try:
-            # Try getting API key directly from environment first
-            api_key = os.getenv("FREEIMAGE_API_KEY")
-            if not api_key:
-                # Fallback to settings
-                settings = get_settings()
-                api_key = settings.freeimage.api_key
-                
-            logger.info(f"API key from env: {bool(os.getenv('FREEIMAGE_API_KEY'))}")
-            logger.info(f"Settings has freeimage: {hasattr(get_settings(), 'freeimage')}")
-            
-            if not api_key:
-                logger.error("No freeimage API key found in settings or environment")
+            if not os.path.exists(file_path):
+                logger.error(f"File does not exist: {file_path}")
                 return None
-
-            # Read file as binary
-            with open(file_path, 'rb') as f:
-                files = {
-                    'source': (Path(file_path).name, f, 'image/jpeg')
-                }
-                data = {
-                    'key': api_key,
-                    'action': 'upload',
-                    'format': 'json'
-                }
                 
-                logger.info(f"Uploading {file_path} to freeimage.host...")
-                response = requests.post(
-                    'https://freeimage.host/api/1/upload',
-                    files=files,
-                    data=data
+            # Get file info
+            file_name = Path(file_path).name
+            file_size = os.path.getsize(file_path)
+            
+            # Determine content type based on file extension
+            content_type = 'application/octet-stream'  # Default
+            if file_path.lower().endswith(('.png')):
+                content_type = 'image/png'
+            elif file_path.lower().endswith(('.jpg', '.jpeg')):
+                content_type = 'image/jpeg'
+            elif file_path.lower().endswith('.gif'):
+                content_type = 'image/gif'
+            elif file_path.lower().endswith('.pdf'):
+                content_type = 'application/pdf'
+                
+            logger.info(f"Uploading {file_path} to Notion (size: {file_size} bytes, type: {content_type})")
+            
+            # Step 1: Create a file upload object
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json"
+            }
+            
+            # Create upload request with file metadata
+            payload = {
+                "filename": file_name,
+                "content_type": content_type
+            }
+            
+            # Make the API call to create the upload
+            creation_response = requests.post(
+                "https://api.notion.com/v1/file_uploads",
+                headers=headers,
+                json=payload
+            )
+            
+            if creation_response.status_code != 200:
+                logger.error(f"Failed to create file upload: {creation_response.status_code} - {creation_response.text}")
+                return None
+                
+            upload_data = creation_response.json()
+            upload_id = upload_data.get('id')
+            upload_url = upload_data.get('upload_url')
+            
+            if not upload_id or not upload_url:
+                logger.error(f"Missing upload ID or URL: {upload_data}")
+                return None
+                
+            logger.info(f"Created file upload with ID: {upload_id}")
+            
+            # Step 2: Upload the file content
+            with open(file_path, 'rb') as file_content:
+                # Upload the file to the provided URL
+                upload_response = requests.put(
+                    upload_url,
+                    data=file_content,
+                    headers={
+                        "Content-Type": content_type
+                    }
                 )
                 
-                logger.info(f"Response status: {response.status_code}")
-                logger.info(f"Response: {response.text}")
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get('status_code') == 200:
-                        image_url = data.get('image', {}).get('url')
-                        logger.info(f"Successfully uploaded image, URL: {image_url}")
-                        return image_url
-                    else:
-                        logger.error(f"Upload failed: {data.get('error', {}).get('message')}")
-                else:
-                    logger.error(f"Request failed with status {response.status_code}")
-                
+                if upload_response.status_code not in (200, 201):
+                    logger.error(f"Failed to upload file: {upload_response.status_code} - {upload_response.text}")
+                    return None
+                    
+            logger.info(f"Successfully uploaded file to Notion")
+            
+            # Return the file object that can be used in Notion
+            return {
+                "name": file_name,
+                "type": "file",
+                "file": {
+                    "upload_id": upload_id
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error uploading file to Notion: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
             
         except Exception as e:
@@ -385,7 +429,7 @@ class NotionTool:
             return None
 
     async def add_chart_to_page(self, page_id: str, chart_path: str, description: str = ""):
-        """Add a chart image to the page's Charts property."""
+        """Add a chart image to the page's Charts property using Notion's direct file upload."""
         try:
             # Get current page
             page = self.client.pages.retrieve(page_id)
@@ -394,25 +438,24 @@ class NotionTool:
             existing_charts = page["properties"].get(self.charts_property, {}).get("files", [])
             logger.info(f"Found {len(existing_charts)} existing charts")
             
-            # Upload image to get public URL
-            public_url = await self._upload_to_freeimage(chart_path)
-            if not public_url:
-                logger.error(f"Failed to upload {chart_path}")
+            # Upload image directly to Notion
+            file_obj = await self._upload_to_notion(chart_path)
+            if not file_obj:
+                logger.error(f"Failed to upload {chart_path} to Notion")
                 return
                 
-            logger.info(f"Got public URL: {public_url}")
+            logger.info(f"Successfully uploaded file to Notion")
             
-            # Create file object for Notion
-            new_chart = {
-                "name": description or Path(chart_path).name,
-                "type": "external",
-                "external": {
-                    "url": public_url
-                }
-            }
+            # Ensure name doesn't exceed Notion's 100-character limit
+            image_name = description or Path(chart_path).name
+            if len(image_name) > 100:
+                image_name = image_name[:97] + "..."
+                
+            # Update the name in the file object
+            file_obj["name"] = image_name
             
             # Add new chart to existing charts
-            updated_charts = existing_charts + [new_chart]
+            updated_charts = existing_charts + [file_obj]
             
             logger.info("Updating Notion page with new chart")
             # Update page with new charts

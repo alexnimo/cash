@@ -531,70 +531,7 @@ document.addEventListener('DOMContentLoaded', () => {
         quotaDiv.innerHTML = html;
     }
 
-    // Initialize LangTrace settings
-    const saveLangtraceButton = document.getElementById('saveLangtraceSettings');
-    if (saveLangtraceButton) {
-        saveLangtraceButton.addEventListener('click', saveLangTraceSettings);
-        // Load initial LangTrace settings
-        loadLangTraceSettings();
-    }
-
-    async function loadLangTraceSettings() {
-        try {
-            const response = await fetch(`${API_BASE_URL}api/langtrace/config`);
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            const data = await response.json();
-            
-            const enabledCheckbox = document.getElementById('langtraceEnabled');
-            if (enabledCheckbox) {
-                enabledCheckbox.checked = data.enabled;
-            }
-        } catch (error) {
-            showError('Error loading LangTrace settings: ' + error.message);
-        }
-    }
-
-    async function saveLangTraceSettings() {
-        const enabledCheckbox = document.getElementById('langtraceEnabled');
-        const apiKeyInput = document.getElementById('langtraceApiKey');
-        
-        if (!enabledCheckbox) {
-            showError('LangTrace settings elements not found');
-            return;
-        }
-
-        try {
-            const response = await fetch(`${API_BASE_URL}api/langtrace/config`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    enabled: enabledCheckbox.checked,
-                    api_key: apiKeyInput?.value || undefined
-                })
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            if (data.status === 'success') {
-                // Clear API key field
-                if (apiKeyInput) {
-                    apiKeyInput.value = '';
-                }
-                showSuccess('LangTrace settings saved successfully');
-            } else {
-                showError(data.error || 'Failed to save LangTrace settings');
-            }
-        } catch (error) {
-            showError('Error saving LangTrace settings: ' + error.message);
-        }
-    }
+    // LangTrace settings functionality removed
 
     // Load settings on startup
     loadSettings();

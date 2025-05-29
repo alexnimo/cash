@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.models.video import Video, VideoStatus
 from app.services.model_manager import ModelManager
 from app.services.report_generator import ReportGenerator
-from app.utils.langtrace_utils import get_langtrace, trace_llm_call, init_langtrace
+from app.utils.langtrace_utils import trace_llm_call  # Keep only trace_llm_call which now has a stub implementation
 from app.utils.path_utils import get_storage_subdir, get_storage_path
 from PIL import Image
 import os
@@ -86,8 +86,24 @@ async def handle_chunked_response(
     if not content_generator_kwargs:
         content_generator_kwargs = {}
         
-    # Get the text from the first response
-    combined_text = first_response.text.strip()
+    # Get the text from the first response - safely handle cases where .text might fail
+    try:
+        combined_text = first_response.text.strip()
+    except Exception as e:
+        logger.warning(f"Could not access response.text: {str(e)}")
+        print(f"{YELLOW}! Could not access response.text: {str(e)}{RESET}")
+        
+        # Set a default empty text since we can't access the original content
+        combined_text = ""
+        
+        # If we have candidates but no text, this might be a valid MAX_TOKENS case with empty parts
+        if hasattr(first_response, "candidates") and first_response.candidates:
+            print(f"{BLUE}Response has candidates but no valid text content. Attempting to continue anyway.{RESET}")
+            logger.info("Response has candidates but no valid text content. Attempting to continue.")
+        else:
+            # If we have no candidates at all, this might be a more serious issue
+            logger.error("Response has no candidates and no text content. Continuation may not work.")
+            print(f"{RED}Response has no candidates and no text content. Continuation may not work.{RESET}")
     
     # Check if response is truncated
     if not is_response_truncated(first_response):
@@ -173,8 +189,25 @@ async def handle_chunked_response(
                 finish_reason = current_response.candidates[0].finish_reason
                 print(f"{BLUE}ℹ Continuation {continuation_attempts} finish reason: {finish_reason}{RESET}")
             
-            # Append to combined text
-            continuation_text = current_response.text.strip()
+            # Append to combined text - safely handle text access
+            try:
+                continuation_text = current_response.text.strip()
+            except Exception as e:
+                logger.warning(f"Could not access continuation response.text: {str(e)}")
+                print(f"{YELLOW}! Could not access continuation response.text: {str(e)}{RESET}")
+                
+                # If we can't get text from the continuation, use an empty string
+                continuation_text = ""
+                
+                # Log finish reason if available for debugging
+                if hasattr(current_response, "candidates") and current_response.candidates:
+                    print(f"{BLUE}Continuation has finish_reason: {current_response.candidates[0].finish_reason} but no valid text content.{RESET}")
+                    logger.info(f"Continuation has finish_reason: {current_response.candidates[0].finish_reason} but no valid text content.")
+                    
+                    # If it's not a MAX_TOKENS reason, we might want to stop retrying
+                    if current_response.candidates[0].finish_reason != 2:
+                        print(f"{YELLOW}Non-MAX_TOKENS finish reason ({current_response.candidates[0].finish_reason}) detected. May need to stop continuation.{RESET}")
+                        break
             
             # Check if we're dealing with JSON content structure
             is_json_content = (
@@ -327,14 +360,9 @@ class ContentAnalyzer:
         logger.info(f"Initialized ContentAnalyzer with summaries_dir: {self.summaries_dir}")
         logger.info(f"Initialized ContentAnalyzer with reports_dir: {self.reports_dir}")
         
-        # Initialize langtrace
-        init_langtrace()
-        self.langtrace = get_langtrace()
-        if self.langtrace:
-            logger.info("LangTrace is available for tracing")
-            logger.info(f"Initialized with dirs: transcript_dir={self.transcript_dir}, raw_transcript_dir={self.raw_transcript_dir}, summaries_dir={self.summaries_dir}, reports_dir={self.reports_dir}")
-        else:
-            logger.warning("LangTrace is not available, tracing will be disabled")
+        # LangTrace has been removed
+        self.langtrace = None
+        logger.info(f"Initialized with dirs: transcript_dir={self.transcript_dir}, raw_transcript_dir={self.raw_transcript_dir}, summaries_dir={self.summaries_dir}, reports_dir={self.reports_dir}")
 
     async def _get_video_analysis_model(self):
         """Get or initialize video analysis model"""
@@ -547,8 +575,14 @@ class ContentAnalyzer:
                         finish_reason = response.candidates[0].finish_reason
                         print(f"{BLUE}Initial response finish reason: {finish_reason}{RESET}")
                     
-                    print(f"{GREEN}Initial frame analysis completed. Response length: {len(response.text)} chars{RESET}")
-                    logger.info("Initial frame analysis completed")
+                    # Safely access response.text
+                    try:
+                        print(f"{GREEN}Initial frame analysis completed. Response length: {len(response.text)} chars{RESET}")
+                        logger.info("Initial frame analysis completed")
+                    except Exception as e:
+                        logger.warning(f"Could not access initial response.text: {str(e)}")
+                        print(f"{YELLOW}Could not access initial response.text: {str(e)}. Will try to continue anyway.{RESET}")
+                        # We'll continue with the handle_chunked_response function which has been updated to handle this case
                     
                     # Handle potential chunked response - provide PDF files for continuations too
                     response_text = await handle_chunked_response(

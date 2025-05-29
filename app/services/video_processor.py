@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Any, Tuple, Union
 import os
 from pathlib import Path
 import logging
+import xml.etree.ElementTree
+import xml.parsers.expat
 import math
 import uuid
 import shutil
@@ -12,7 +14,7 @@ import json
 from datetime import datetime
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-from app.utils.langtrace_utils import get_langtrace, init_langtrace
+# Removed langtrace import
 from app.utils.path_utils import get_storage_subdir, get_storage_path
 import google.generativeai as genai
 from google.generativeai.types import GenerateContentResponse
@@ -59,12 +61,8 @@ YELLOW = "\033[93m"
 BLUE = "\033[94m"
 RESET = "\033[0m"
 
-# Initialize LangTrace at module level
-_tracer = init_langtrace()
-if _tracer:
-    logger.info("LangTrace initialized successfully at module level")
-else:
-    logger.warning("Failed to initialize LangTrace at module level")
+# LangTrace initialization removed
+logger.info("LangTrace functionality has been removed from this module")
 
 # Configure models
 configure_models()
@@ -369,10 +367,19 @@ class VideoProcessor:
                     return None
 
             if transcript:
-                # Fetch the transcript data
+                # Fetch the transcript data with robust error handling
                 logger.info(f"Fetching transcript data in {transcript_language}...")
-                transcript_data = transcript.fetch()
-                logger.info(f"Got transcript with {len(transcript_data)} segments")
+                try:
+                    transcript_data = transcript.fetch()
+                    logger.info(f"Got transcript with {len(transcript_data)} segments")
+                except (xml.etree.ElementTree.ParseError, xml.parsers.expat.ExpatError) as xml_err:
+                    logger.warning(f"XML parsing error when fetching transcript: {xml_err}")
+                    logger.info("Continuing with audio extraction as fallback")
+                    return None
+                except Exception as e:
+                    logger.warning(f"Error fetching transcript data: {e}")
+                    logger.info("Continuing with audio extraction as fallback")
+                    return None
                 
                 # Handle FetchedTranscriptSnippet objects
                 # Extract data in a way that works with both dictionary-like objects and FetchedTranscriptSnippet objects
@@ -571,34 +578,56 @@ class VideoProcessor:
                 self.video_status[video.id]["error"] = "No valid transcript available"
                 raise VideoProcessingError("No valid transcript available - cannot proceed with analysis")
                     
-            # Extract frames
-            logger.info(f"Extracting frames from video {video.id}")
-            frames = await self._extract_frames(video)
-            logger.debug(f"Extracted frames: {frames}")
-            
-            if frames:
-                # Update analysis with frame paths
-                if not video.analysis:
-                    logger.debug("Creating new VideoAnalysis with extracted frames")
-                    video.analysis = VideoAnalysis(
-                        transcript='',
-                        summary='',
-                        key_frames=frames,
-                        embedding_id=''
-                    )
-                else:
-                    logger.debug(f"Updating existing VideoAnalysis with {len(frames)} frames")
-                    video.analysis.key_frames = frames
-                logger.info(f"Extracted {len(frames)} frames")
-                self.video_status[video.id]["progress"]["extracting_frames"] = 100
-            else:
-                logger.warning("No frames were extracted")
-
-            # Analyze content
+            # Analyze content first - we need the transcript and summary before extracting frames
             logger.info(f"Analyzing content for video {video.id}")
             video = await self._analyze_content(video)
             self.video_status[video.id]["progress"]["analyzing"] = 100
             logger.info("Content analysis completed")
+            
+            # If content analysis failed, don't proceed with frame extraction
+            if video.status == VideoStatus.FAILED:
+                logger.warning(f"Skipping frame extraction for video {video.id} due to content analysis failure")
+                self.video_status[video.id]["progress"]["extracting_frames"] = 0
+            else:
+                # Extract frames only if transcript processing succeeded
+                logger.info(f"Extracting frames from video {video.id}")
+                frames = await self._extract_frames(video)
+                logger.debug(f"Extracted frames: {frames}")
+                
+                if frames:
+                    # Update analysis with frame paths
+                    if not video.analysis:
+                        logger.debug("Creating new VideoAnalysis with extracted frames")
+                        video.analysis = VideoAnalysis(
+                            transcript='',
+                            summary='',
+                            key_frames=frames,
+                            embedding_id=''
+                        )
+                    else:
+                        logger.debug(f"Updating existing VideoAnalysis with {len(frames)} frames")
+                        video.analysis.key_frames = frames
+                    logger.info(f"Extracted {len(frames)} frames")
+                    self.video_status[video.id]["progress"]["extracting_frames"] = 100
+                    
+                    # IMPORTANT: After frames are extracted, we need to re-run content analysis 
+                    # to process the frames and update the analysis with frame information
+                    logger.info(f"Re-running content analysis to include frame analysis for video {video.id}")
+                    video = await self._analyze_content(video)
+                    logger.info("Frame analysis completed and included in content analysis")
+                else:
+                    logger.warning("No frames were extracted")
+                    self.video_status[video.id]["progress"]["extracting_frames"] = 0
+                
+                # Agent workflow - integrated into standard processing
+                logger.info(f"Starting integrated agent workflow for video {video.id}")
+                try:
+                    # Execute agent workflow as an integral part of the processing pipeline
+                    result = await self._trigger_agent_workflow(video)
+                    logger.info(f"Agent workflow completed with result: {result}")
+                except Exception as agent_error:
+                    logger.error(f"Failed to complete agent workflow: {str(agent_error)}", exc_info=True)
+                    # Continue with video processing even if agent workflow fails
 
             # Update status
             self.video_status[video.id]["status"] = "completed"
@@ -1426,15 +1455,8 @@ class VideoProcessor:
                 logger.error(f"Failed to analyze frames: {str(e)}", exc_info=True)
                 logger.warning("Continuing with original analysis without frames")
             
-            # Agent workflow - integrated into standard processing
-            logger.info(f"Starting integrated agent workflow for video {video.id}")
-            try:
-                # Execute agent workflow as an integral part of the processing pipeline
-                result = await self._trigger_agent_workflow(video)
-                logger.info(f"Agent workflow completed with result: {result}")
-            except Exception as agent_error:
-                logger.error(f"Failed to complete agent workflow: {str(agent_error)}", exc_info=True)
-                # Continue with video processing even if agent workflow fails
+            # Agent workflow has been moved to the main process_video method
+            # to ensure it runs after both content analysis and frame extraction
             
             # Update video status
             self.video_status[video.id]["status"] = "completed"

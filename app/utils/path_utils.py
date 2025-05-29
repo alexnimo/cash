@@ -58,10 +58,92 @@ def get_base_storage_path() -> Path:
     Returns:
         Path: Path object for the base storage directory
     """
-    from app.core.config import get_settings
+    import logging
+    logger = logging.getLogger(__name__)
     
-    base_path = Path(get_settings().storage.base_path)
-    base_path.mkdir(parents=True, exist_ok=True)
+    # We'll log a critical error if no configuration source can be found
+    config_found = False
+    
+    try:
+        # Directly try to load from YAML file which is our primary source of truth
+        try:
+            import yaml
+            # Try multiple possible locations for config.yaml
+            possible_config_paths = [
+                Path(__file__).parents[3] / 'config.yaml',  # /project/config.yaml
+                Path(__file__).parents[2] / 'config.yaml',  # /project/app/config.yaml
+                Path(__file__).parent.parent.parent.parent / 'video-analyzer' / 'config.yaml',  # For WSL paths
+            ]
+            
+            config_path = None
+            for path in possible_config_paths:
+                if path.exists():
+                    config_path = path
+                    logger.info(f"Found config file at: {config_path}")
+                    break
+                    
+            if config_path and config_path.exists():
+                with open(config_path, 'r') as f:
+                    yaml_config = yaml.safe_load(f)
+                if 'storage' in yaml_config and 'base_path' in yaml_config['storage']:
+                    base_path = Path(yaml_config['storage']['base_path'])
+                    logger.info(f"Using base_path from config.yaml: {base_path}")
+                    config_found = True
+                else:
+                    logger.error("storage.base_path not found in config.yaml")
+            else:
+                logger.error(f"Config file not found at {config_path}")
+        except Exception as yaml_err:
+            logger.error(f"Error loading config.yaml: {str(yaml_err)}")
+        
+        # Only try other methods if direct YAML loading failed
+        if not config_found:
+            # Try the unified config system with direct attribute access
+            try:
+                from app.core.unified_config import get_config
+                config = get_config()
+                
+                if hasattr(config, 'storage') and hasattr(config.storage, 'base_path'):
+                    base_path = Path(config.storage.base_path)
+                    logger.info(f"Using base_path from unified config: {base_path}")
+                    config_found = True
+            except Exception as unified_err:
+                logger.warning(f"Could not access base_path from unified config: {str(unified_err)}")
+            
+            # If still not found, try legacy settings
+            if not config_found:
+                try:
+                    from app.core.config import get_settings
+                    settings = get_settings()
+                    if hasattr(settings, 'storage') and hasattr(settings.storage, 'base_path'):
+                        base_path = Path(settings.storage.base_path)
+                        logger.info(f"Using base_path from legacy settings: {base_path}")
+                        config_found = True
+                except Exception as settings_err:
+                    logger.warning(f"Could not access base_path from legacy settings: {str(settings_err)}")
+    
+    except Exception as e:
+        logger.error(f"Unexpected error determining base storage path: {str(e)}")
+    
+    # If we couldn't find any configuration, log a critical error
+    if not config_found:
+        logger.critical("No storage.base_path configuration found in any config source!")
+        logger.critical("Please ensure storage.base_path is properly set in config.yaml")
+        raise ValueError("storage.base_path not configured - application cannot proceed without explicit configuration")
+    
+    # Ensure the directory exists
+    try:
+        base_path.mkdir(parents=True, exist_ok=True)
+        
+        if base_path.exists():
+            logger.info(f"Successfully verified/created base storage directory at {base_path}")
+        else:
+            logger.critical(f"Failed to create directory at {base_path} - directory does not exist after creation attempt")
+            raise IOError(f"Could not create directory at {base_path}")
+    except Exception as mkdir_err:
+        logger.critical(f"Critical error creating directory at {base_path}: {str(mkdir_err)}")
+        raise IOError(f"Failed to create storage directory: {str(mkdir_err)}")
+        
     return base_path
 
 def get_storage_subdir(subdir_name: str) -> Path:

@@ -24,12 +24,11 @@ from llama_index.core.prompts import PromptTemplate
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
 
-try:
-    from langchain.agents import create_react_agent
-    from langchain.agents.agent import AgentExecutor
-    from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-except ImportError as e:
-    logging.error(f"Error importing langchain: {str(e)}")
+# Removed langchain dependency - using llama_index exclusively
+# llama_index.core.agent already includes all the agent functionality we need
+from llama_index.core.agent import ReActAgent
+from llama_index.core.llms import ChatMessage, MessageRole
+from llama_index.core.memory import ChatMemoryBuffer
 
 
 
@@ -960,9 +959,12 @@ class RAGAgent:
                 return {"status": "no_updates_needed"}
 
             # Prepare report for Notion update - ensure frame_paths are included
+            # Include both channel name formats for compatibility
+            channel_name = market_report.get('Channel name', market_report.get('channel_name', ''))
             notion_report = {
                 "Date": market_report.get('Date'),
-                "Channel name": market_report.get('Channel name'),
+                "Channel name": channel_name,  # Original format
+                "channel_name": channel_name,  # Alternate format for compatibility
                 "sections": sections_to_update
             }
             
@@ -978,23 +980,27 @@ class RAGAgent:
                 else:
                     logger.warning(f"Section for stocks {section.get('stocks', [])} has no frames")
 
-            # Save debug information only if agent_debug is enabled
-            if self.agent_debug_enabled:
-                debug_file = self.debug_dir / f"notion_data_{int(time.time())}.json"
-                with open(debug_file, "w") as f:
-                    json.dump(notion_report, f, indent=2)
-                logger.info(f"Saved data being sent to Notion: {debug_file}")
+            # Save debug information only if agent_debug is enabled and debug_dir exists
+            if self.agent_debug_enabled and self.debug_dir:
+                try:
+                    debug_file = self.debug_dir / "notion_data_latest.json"
+                    with open(debug_file, "w") as f:
+                        json.dump(notion_report, f, indent=2)
+                    logger.info(f"Saved data being sent to Notion: {debug_file}. This is the single source of truth for Notion updates.")
+                except Exception as e:
+                    logger.warning(f"Failed to save debug file: {e}")
 
-            # Update Notion
-            logger.info("Calling Notion agent execute method...")
-            try:
-                notion_result = await self.notion_agent.execute(notion_report)
-                logger.info(f"Notion update result: {notion_result}")
-            except Exception as e:
-                logger.error(f"Error executing Notion agent: {str(e)}")
-                logger.error(f"Traceback: {traceback.format_exc()}")
-                notion_result = {"status": "error", "message": str(e)}
-
+            # Always return the processed data in the response
+            # The Notion agent will use this data directly if it can't load from the debug file
+            logger.info("RAG processing complete. Returning data for Notion agent.")
+            return {
+                "status": "success",
+                "notion_data": notion_report,
+                "sections": sections_to_update,
+                "channel_name": channel_name,
+                "date": datetime.datetime.now().strftime('%Y-%m-%d')
+            }
+            
             # Update vector store with new sections
             for section in sections_to_update:
                 section_text = self._prepare_section_text(section)
@@ -1013,8 +1019,15 @@ class RAGAgent:
                     metadata=metadata
                 )
                 await self.pinecone_tool.process_documents([doc])
-
-            return notion_report
+            
+            # Return the processed data so the main workflow can pass it to Notion
+            return {
+                "status": "processed", 
+                "message": "Data processed, ready for Notion update in main workflow",
+                "sections": sections_to_update,  # Return the processed sections
+                "report": notion_report,  # Return the full report structure
+                "original_report": market_report  # Include the original market_report to preserve all data
+            }
 
         except Exception as e:
             logger.error(f"Error in RAG execution: {str(e)}")
@@ -1216,35 +1229,67 @@ class NotionAgent(BaseFinanceAgent):
         retry_count = 0
         last_error = None
         
+        # Normalize input to ensure we're working with a dictionary
+        if not isinstance(input_text, dict):
+            input_text = {}
+        
+        # Try to load data from RAG agent's debug file if no valid input provided and debug is enabled
+        if (not input_text.get('sections') and 
+            self.agent_debug_enabled and 
+            self.debug_dir and 
+            (rag_debug_file := self.debug_dir / "notion_data_latest.json").exists()):
+            
+            try:
+                with open(rag_debug_file, 'r') as f:
+                    debug_data = json.load(f)
+                
+                # Only use debug data if it has sections
+                if isinstance(debug_data, dict) and debug_data.get('sections'):
+                    logger.info(f"Loaded data from RAG agent's debug file: {rag_debug_file}")
+                    # Update input_text with debug data, but don't overwrite existing fields
+                    input_text = {**debug_data, **input_text}
+            except Exception as e:
+                logger.warning(f"Failed to load data from RAG debug file: {e}")
+        
         # Log debug information about the input
         if isinstance(input_text, dict):
-            logger.info(f"NotionAgent received dictionary input with keys: {list(input_text.keys())}")
+            logger.info(f"NotionAgent processing data with keys: {list(input_text.keys())}")
             
-            # Extract stock data from sections
-            if 'sections' in input_text:
-                # Each section should have 'stocks' field with stock tickers
-                all_stocks = []
-                for section in input_text.get('sections', []):
-                    if 'stocks' in section:
-                        all_stocks.extend(section['stocks'])
-                
-                logger.info(f"Processing {len(all_stocks)} stocks from sections: {', '.join(all_stocks)}")
+            # Extract stock data from sections or notion_data.sections
+            sections = input_text.get('sections', [])
+            if not sections and 'notion_data' in input_text and isinstance(input_text['notion_data'], dict):
+                sections = input_text['notion_data'].get('sections', [])
+            
+            all_stocks = []
+            for section in sections:
+                if isinstance(section, dict) and 'stocks' in section and isinstance(section['stocks'], list):
+                    all_stocks.extend([str(s).upper() for s in section['stocks'] if s])
+            
+            if all_stocks:
+                logger.info(f"Processing {len(all_stocks)} stocks: {', '.join(all_stocks)}")
             else:
-                # Legacy format with direct stocks array
-                stocks_data = input_text.get('stocks', [])
-                logger.info(f"Processing {len(stocks_data)} stocks: {', '.join([s.get('ticker', 'unknown') for s in stocks_data if isinstance(s, dict) and 'ticker' in s])}")
+                logger.warning("No valid stocks found in input data")
+                return {
+                    "status": "error", 
+                    "message": "No valid stocks found in input data",
+                    "input_keys": list(input_text.keys())
+                }
         else:
-            logger.info(f"NotionAgent received text input of length: {len(input_text)}")
+            error_msg = f"Invalid input format. Expected dictionary, got: {type(input_text)}"
+            logger.error(error_msg)
+            return {"status": "error", "message": error_msg}
             
         while retry_count < max_retries:
             try:
                 # Format the input data to create a clear instruction for the Notion update
                 if isinstance(input_text, dict):
-                    formatted_instruction = "Please update Notion with the following stock analysis data:"
+                    # Skip debug file creation - we're using the RAG agent's debug file as the single source of truth
+                    logger.info("Processing data for Notion update (using RAG agent's output as source)")
                     
                     if not self.notion_tool:
-                        logger.error("Notion tool not available for direct execution")
-                        return {"error": "Notion tool not found", "status": "failed"}
+                        error_msg = "Notion tool not available for direct execution"
+                        logger.error(error_msg)
+                        return {"error": error_msg, "status": "failed"}
                     
                     successful_updates = 0
                     failed_updates = 0
@@ -1294,7 +1339,7 @@ class NotionAgent(BaseFinanceAgent):
                                             "operation": "update_technical_analysis",
                                             "page_id": page_id,
                                             "content": summary,
-                                            "channel_name": input_text.get('Channel name', 'Unknown')
+                                            "channel_name": input_text.get('Channel name', input_text.get('channel_name', 'Unknown Channel'))
                                         })
                                     else:
                                         logger.info(f"Creating new page for {stock}")
@@ -1386,13 +1431,24 @@ class NotionAgent(BaseFinanceAgent):
             Dictionary with status and results
         """
         try:
-            # Validate input
+            # Try to load data from RAG agent's debug file if no data provided
+            if not data or not isinstance(data, dict) or 'sections' not in data:
+                rag_debug_file = self.debug_dir / "notion_data_latest.json"
+                if rag_debug_file.exists():
+                    try:
+                        with open(rag_debug_file, 'r') as f:
+                            data = json.load(f)
+                        logger.info(f"Loaded data from RAG agent's debug file: {rag_debug_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to load data from RAG debug file: {e}")
+            
+            # Validate input after potential file load
             if not isinstance(data, dict):
                 raise ValueError("Input data must be a dictionary")
                 
             # Check for required fields
             if 'sections' not in data:
-                logger.warning("Input data missing 'sections' key")
+                raise ValueError("Input data missing required 'sections' key")
                 
             # Check for notion tool
             if not self.notion_tool:
@@ -1493,6 +1549,9 @@ class AgentWorkflow:
         
         If config is None, loads configuration directly from config.yaml
         """
+        # Initialize debug directory path
+        self.debug_dir = None
+        
         if config is None:
             self.config = self._load_config_from_yaml()
             logger.info("Loaded configuration directly from config.yaml")
@@ -1500,6 +1559,20 @@ class AgentWorkflow:
             self.config = config
             logger.info("Using provided configuration dictionary")
             
+        # Set up debug directory if agent_debug is enabled
+        unified_config = get_config()
+        self.agent_debug_enabled = unified_config.get('agents', 'agent_debug', default=False)
+        
+        if self.agent_debug_enabled:
+            storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
+            self.debug_dir = Path(storage_base_path) / 'debug'
+            try:
+                self.debug_dir.mkdir(exist_ok=True, parents=True)
+                logger.info(f"Debug directory set up at: {self.debug_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to create debug directory: {e}")
+                self.debug_dir = None
+        
         logger.info(f"AgentWorkflow initialized with config keys: {list(self.config.keys()) if isinstance(self.config, dict) else 'Not a dict'}")
         self.agents = self._initialize_agents()
         
@@ -1795,7 +1868,37 @@ class AgentWorkflow:
                 # Step 3: RAG Processing
                 logger.info("Starting RAG processing step")
                 rag_result = await self.agents['rag'].execute(analysis_data)
-                analysis_data.update(rag_result)
+                
+                # Handle the RAG agent response
+                if isinstance(rag_result, dict):
+                    # First, update analysis_data with all RAG results
+                    analysis_data.update(rag_result)
+                    
+                    # Check if we have notion_data directly in the response
+                    if 'notion_data' in rag_result:
+                        notion_data = rag_result['notion_data']
+                        analysis_data['notion_data'] = notion_data
+                        logger.info("Using notion_data directly from RAG agent response")
+                    # Otherwise, try to load from debug file if it exists
+                    elif self.debug_dir and (rag_debug_file := self.debug_dir / "notion_data_latest.json").exists():
+                        try:
+                            with open(rag_debug_file, 'r') as f:
+                                notion_data = json.load(f)
+                            analysis_data['notion_data'] = notion_data
+                            logger.info(f"Loaded processed data from RAG agent's output file: {rag_debug_file}")
+                        except Exception as e:
+                            logger.error(f"Failed to load RAG agent's output file: {e}")
+                    
+                    # Log the channel name for debugging if available
+                    if 'notion_data' in analysis_data:
+                        notion_data = analysis_data['notion_data']
+                        channel_name = notion_data.get('Channel name', 
+                                                   notion_data.get('channel_name', 
+                                                   rag_result.get('channel_name', 'Not Found')))
+                        logger.info(f"Channel name in RAG data: {channel_name}")
+                    else:
+                        logger.warning("No notion_data available after RAG processing")
+                
                 results["rag_processing"] = {"status": "completed"}
             except Exception as rag_error:
                 error_msg = f"RAG processing failed: {str(rag_error)}"
@@ -1806,7 +1909,39 @@ class AgentWorkflow:
             try:
                 # Step 4: Notion Update
                 logger.info("Starting Notion update step")
-                notion_result = await self.agents['notion'].execute(analysis_data)
+                
+                # Check if RAG agent has provided preprocessed data for Notion
+                if 'notion_data' in analysis_data:
+                    logger.info("Using preprocessed data from RAG agent for Notion update")
+                    # Use the preprocessed data from RAG agent
+                    notion_data = analysis_data['notion_data']
+                    
+                    # Ensure channel name is included in both formats
+                    if 'Channel name' in analysis_data and 'Channel name' not in notion_data:
+                        notion_data['Channel name'] = analysis_data['Channel name']
+                    if 'channel_name' in analysis_data and 'channel_name' not in notion_data:
+                        notion_data['channel_name'] = analysis_data['channel_name']
+                        
+                    # Log the channel name being used
+                    channel_name = notion_data.get('Channel name', notion_data.get('channel_name', 'Not Found'))
+                    logger.info(f"Channel name being passed to Notion: {channel_name}")
+                    
+                    notion_result = await self.agents['notion'].execute(notion_data)
+                else:
+                    # Fall back to using the full analysis_data if no preprocessed data is available
+                    logger.info("No preprocessed data found, using full analysis data for Notion update")
+                    
+                    # Ensure analysis_data has consistent channel name format
+                    if 'Channel name' in analysis_data and 'channel_name' not in analysis_data:
+                        analysis_data['channel_name'] = analysis_data['Channel name']
+                    elif 'channel_name' in analysis_data and 'Channel name' not in analysis_data:
+                        analysis_data['Channel name'] = analysis_data['channel_name']
+                        
+                    # Log the channel name being used
+                    channel_name = analysis_data.get('Channel name', analysis_data.get('channel_name', 'Not Found'))
+                    logger.info(f"Channel name being passed to Notion: {channel_name}")
+                    
+                    notion_result = await self.agents['notion'].execute(analysis_data)
                 results["notion_update"] = {"status": "completed"}
                 results.update(notion_result)
             except Exception as notion_error:
