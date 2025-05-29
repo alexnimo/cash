@@ -408,8 +408,11 @@ class PineconeAdvancedToolSpec(BaseTool):
         """Query similar documents"""
         try:
             query_embedding = await self.embed_model._aget_text_embedding(query_text)
+            
             try:
-                logger.info(f"Querying Pinecone with top_k={top_k} using v6+ SDK approach")
+                logger.info(f"Querying Pinecone with top_k={top_k}")
+                
+                # Direct query approach
                 query_response = self.index.query(
                     vector=query_embedding,
                     top_k=top_k,
@@ -417,6 +420,7 @@ class PineconeAdvancedToolSpec(BaseTool):
                     include_metadata=True
                 )
                 
+                # Process the response
                 formatted_results = []
                 if hasattr(query_response, 'matches'):
                     for match in query_response.matches:
@@ -447,32 +451,8 @@ class PineconeAdvancedToolSpec(BaseTool):
                                 })
                 return formatted_results
             except Exception as e:
-                logger.warning(f"Error with v6+ query approach: {e}. Trying v5 approach...", exc_info=True)
-                try:
-                    query_response = self.index.query(
-                        queries=[query_embedding], # Older SDKs might expect a list of queries
-                        top_k=top_k,
-                        include_metadata=True,
-                        filter=filter
-                    )
-                    formatted_results = []
-                    if isinstance(query_response, dict) and 'results' in query_response and query_response['results']:
-                         # Assuming the first result in the list corresponds to the single query
-                        for match in query_response['results'][0]['matches']:
-                            formatted_results.append({
-                                'score': match.get('score', 0.0),
-                                'metadata': match.get('metadata', {})
-                            })
-                    elif isinstance(query_response, dict) and 'matches' in query_response: # Some older versions might return matches directly
-                        for match in query_response['matches']:
-                            formatted_results.append({
-                                'score': match.get('score', 0.0),
-                                'metadata': match.get('metadata', {})
-                            })
-                    return formatted_results
-                except Exception as e2:
-                    logger.error(f"Query failed with both v6+ and v5 approaches: {e2}", exc_info=True)
-                    return []
+                logger.error(f"Error with Pinecone query: {e}", exc_info=True)
+                return []
         except Exception as e:
             logger.error(f"Error querying similar documents: {str(e)}", exc_info=True)
             return []

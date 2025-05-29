@@ -24,20 +24,18 @@ async def main():
     load_dotenv()
     logger.info("Environment variables loaded")
     
-    # Initialize LangTrace
-    logger.info("Initializing LangTrace...")
+    # Initialize LangTrace (now a stub implementation that always returns False)
+    logger.info("Initializing LangTrace stub...")
     success = init_langtrace()
-    logger.info(f"LangTrace initialization result: {success}")
+    logger.info(f"LangTrace initialization result: {success} (expected False since tracing is now disabled)")
     
-    if not success:
-        logger.error("LangTrace initialization failed")
-        return
-    
-    # Test tracing
-    logger.info("Testing LangTrace...")
+    # Even though success will be False, we'll continue with the test to ensure compatibility
+    logger.info("Testing trace_gemini_call decorator (stub implementation)...")
     try:
         result = await test_function()
         logger.info(f"Test function result: {result}")
+        logger.info("Tracing has been successfully disabled across the codebase.")
+        logger.info("The trace_gemini_call decorator now only provides timing logs.")
     except Exception as e:
         logger.error(f"Error in test function: {str(e)}", exc_info=True)
 

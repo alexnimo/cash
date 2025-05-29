@@ -7,12 +7,7 @@ import google.generativeai as genai
 from app.core.unified_config import get_config
 from app.services.model_config import configure_models
 from app.utils.rate_limiter import RateLimiter
-from app.utils.langtrace_utils import (
-    trace_gemini_call, 
-    get_langtrace, 
-    init_langtrace, 
-    setup_gemini
-)
+from app.utils.langtrace_utils import trace_gemini_call  # Keep only trace_gemini_call which now has a stub implementation
 import logging
 import time
 import asyncio
@@ -23,17 +18,8 @@ from llama_index.llms.openai import OpenAI
 config = get_config()
 logger = logging.getLogger(__name__)
 
-# Initialize LangTrace at module level
-init_success = init_langtrace()
-if init_success:
-    logger.info("LangTrace initialized successfully at module level")
-    # Set up Gemini integration
-    if setup_gemini():
-        logger.info("Gemini integration set up successfully")
-    else:
-        logger.warning("Failed to set up Gemini integration")
-else:
-    logger.warning("Failed to initialize LangTrace at module level")
+# LangTrace initialization removed
+logger.info("LangTrace functionality has been removed from this module")
 
 def encode_image_to_base64(image_path: str) -> str:
     """Encode an image file to base64."""
@@ -104,27 +90,65 @@ class ModelManager:
                 self.frame_analysis_config = self.config.model.frame_analysis
             if hasattr(self.config.model, 'transcription'):
                 self.transcription_config = self.config.model.transcription
+
+        # Process and normalize config objects into dictionaries
+        self.video_analysis_config = self._normalize_config_to_dict(self.video_analysis_config)
+        self.frame_analysis_config = self._normalize_config_to_dict(self.frame_analysis_config)
+        self.transcription_config = self._normalize_config_to_dict(self.transcription_config)
                 
         # Log the loaded configs
         if self.video_analysis_config:
-            logger.info(f"Loaded video_analysis config: {self._get_config_summary(self.video_analysis_config)}")
+            logger.info(f"Loaded video_analysis config: {self.video_analysis_config}")
             # Add to model_configs for backward compatibility
             if 'name' in self.video_analysis_config:
-                self.model_configs[self.video_analysis_config['name']] = self.video_analysis_config
+                model_name = self.video_analysis_config['name']
+                self.model_configs[model_name] = self.video_analysis_config
+                logger.info(f"Registered video_analysis model: {model_name}")
         
         if self.frame_analysis_config:
-            logger.info(f"Loaded frame_analysis config: {self._get_config_summary(self.frame_analysis_config)}")
+            logger.info(f"Loaded frame_analysis config: {self.frame_analysis_config}")
             # Add to model_configs for backward compatibility
             if 'name' in self.frame_analysis_config:
-                self.model_configs[self.frame_analysis_config['name']] = self.frame_analysis_config
+                model_name = self.frame_analysis_config['name']
+                self.model_configs[model_name] = self.frame_analysis_config
+                logger.info(f"Registered frame_analysis model: {model_name}")
         
         if self.transcription_config:
-            logger.info(f"Loaded transcription config: {self._get_config_summary(self.transcription_config)}")
+            logger.info(f"Loaded transcription config: {self.transcription_config}")
             # Add to model_configs for backward compatibility
             if 'name' in self.transcription_config:
-                self.model_configs[self.transcription_config['name']] = self.transcription_config
+                model_name = self.transcription_config['name']
+                self.model_configs[model_name] = self.transcription_config
+                logger.info(f"Registered transcription model: {model_name}")
         else:
             logger.error("Failed to load transcription config from config file")
+            
+        # Log all registered models
+        logger.info(f"Registered models: {list(self.model_configs.keys())}")
+    
+    def _normalize_config_to_dict(self, config):
+        """Normalize config object to dictionary regardless of input type"""
+        if config is None:
+            return None
+            
+        if isinstance(config, dict):
+            return config
+        
+        # Handle object-style configs
+        if hasattr(config, '__dict__'):
+            result = {}
+            for key, value in config.__dict__.items():
+                if not key.startswith('_'):  # Skip private attributes
+                    result[key] = value
+            return result
+            
+        # Handle attribute-style configs
+        result = {}
+        for attr in ['name', 'type', 'temperature', 'thinking_budget', 'enabled']:
+            if hasattr(config, attr):
+                result[attr] = getattr(config, attr)
+                
+        return result
     
     def _get_model_section(self, section_name):
         """Get a model section from config using ConfigManager"""

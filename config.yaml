@@ -47,10 +47,10 @@ api:
   port: 8000
   cors_origins: ["http://localhost:8000", "http://127.0.0.1:8000", "file://"]
 
-# LangTrace Configuration
+# LangTrace Configuration (disabled)
 langtrace:
-  enabled: true
-  api_key: "${LANGTRACE_API_KEY}"
+  enabled: false
+  api_key: ""
   project_id: "vid-expert"
   trace_dir: "./traces"
   sampling_rate: 1.0

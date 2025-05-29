@@ -22,7 +22,7 @@ from app.services.model_manager import ModelManager
 from app.core.config import get_settings
 from app.api.routes import router as api_router
 from app.routes import settings_routes
-from app.utils.langtrace_utils import init_langtrace, get_langtrace
+# Removed langtrace import
 from app.agents.technical_analysis_agent import TechnicalAnalysisAgent
 
 # Configure logging at the root level
@@ -35,17 +35,8 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-# Initialize LangTrace at startup
-logger.info("Initializing LangTrace...")
-if init_langtrace():
-    logger.info("LangTrace initialized successfully")
-    langtrace_instance = get_langtrace()
-    if langtrace_instance:
-        logger.info("LangTrace instance verified")
-    else:
-        logger.error("Failed to verify LangTrace instance")
-else:
-    logger.error("Failed to initialize LangTrace")
+# LangTrace initialization removed
+logger.info("LangTrace support has been completely removed from the codebase")
 
 app = FastAPI(title=settings.app_name)
 

@@ -7,7 +7,7 @@ uvicorn>=0.24.0
 python-multipart>=0.0.6
 pyyaml>=6.0.1
 openai>=1.8.0,<2.0.0  # Updated to be compatible with latest llama-index-llms-openai
-langtrace-python-sdk>=0.1.0
+# langtrace-python-sdk removed
 aiohttp>=3.9.1
 asyncio>=3.4.3
 fastapi-cors>=0.0.6

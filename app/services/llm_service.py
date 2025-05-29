@@ -11,15 +11,14 @@ import logging
 
 from app.llm.llm_factory import LLMFactory
 from app.config.agent_config import AGENT_CONFIG
-from app.utils.langtrace_utils import get_langtrace, trace_llm_call
+from app.utils.langtrace_utils import trace_llm_call  # Keep only trace_llm_call which now has a stub implementation
 from app.core.config import get_settings
 from app.services.model_manager import ModelManager, encode_image_to_base64
 
 logger = logging.getLogger(__name__)
 
-# Initialize settings and LangTrace
+# Initialize settings
 settings = get_settings()
-_langtrace = get_langtrace()
 
 class LLMService:
     """Service class for handling LLM operations"""
@@ -28,7 +27,7 @@ class LLMService:
         """Initialize LLM service"""
         self.llm_factory = LLMFactory()
         self.pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
-        self._langtrace = _langtrace
+        self._langtrace = None  # LangTrace disabled
         self._model_manager = None
         
     @property
@@ -122,27 +121,15 @@ class LLMService:
             logger.debug("Frame analysis prompt created")
             
             try:
-                if self._langtrace:
-                    with self._langtrace.trace() as trace:
-                        trace.add_metadata({
-                            "function": "analyze_frames",
-                            "frame_path": frame,
-                            "prompt": prompt
-                        })
-                        logger.info(f"Starting frame analysis with trace_id: {trace.trace_id}")
-                        response = await client.generate_content(
-                            [prompt, base64_image],
-                            trace_id=trace.trace_id
-                        )
-                else:
-                    logger.debug("LangTrace not available, proceeding without tracing")
-                    response = await client.generate_content([prompt, base64_image])
+                # LangTrace functionality removed
+                logger.debug("Proceeding with frame analysis (no tracing)")
+                response = await client.generate_content([prompt, base64_image])
 
                 if response.text:
                     result = {
                         "frame": frame,
                         "analysis": response.text,
-                        "trace_id": trace.trace_id if self._langtrace else None
+                        "trace_id": None  # LangTrace removed
                     }
                     logger.info(f"Frame analysis successful: {frame}")
                     results.append(result)
