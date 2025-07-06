@@ -80,6 +80,24 @@ logging:
 video_storage:
   base_dir: "videos"
 
+# File Janitor Settings - Automated cleanup of generated files
+janitor:
+  enabled: true
+  schedule: "0 1 * * *"  # Cron syntax: daily at 1:00 AM
+  cleanup_paths:
+    - "videos"  # Clean video files
+    - "temp"    # Clean temp files
+    - "data/summaries"  # Clean analysis files
+    - "traces"  # Clean trace files
+  file_patterns:
+    - "*.mp4"
+    - "*.wav"
+    - "*.json"
+    - "*.txt"
+    - "*.log"
+  keep_files_hours: 24  # Keep files for 24 hours before cleanup
+  dry_run: false  # Set to true to see what would be deleted without actually deleting
+
 # Notion settings
 notion:
   api_key: "${NOTION_API_KEY}"

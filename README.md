@@ -10,9 +10,11 @@ A powerful tool for analyzing YouTube videos using AI, featuring intelligent cha
 
 - **Video Processing**
   - Single video upload and analysis
-  - Multiple videos batch processing
+  - Multiple videos batch processing with sequential queue
   - YouTube playlist support
   - Automatic transcription and content extraction
+  - File upload API for direct video uploads
+  - Intelligent video processing queue management
 
 - **AI-Powered Analysis**
   - Advanced language model integration
@@ -20,11 +22,25 @@ A powerful tool for analyzing YouTube videos using AI, featuring intelligent cha
   - Intelligent content summarization
   - Context-aware chat interface
 
-- **User Interface**
+- **Enhanced User Interface**
   - Modern, responsive web interface
   - Real-time processing status updates
+  - Enhanced console log with scroll, color coding, and timestamps
   - Interactive chat with processed content
+  - Video processing queue status monitoring
   - Easy-to-use upload forms
+
+- **System Management**
+  - Automated file cleanup service (janitor) with cron scheduling
+  - Configurable retention policies
+  - Background maintenance tasks
+  - Queue management and monitoring
+
+- **API Integration**
+  - RESTful API for video upload and analysis
+  - Queue management endpoints
+  - File cleanup management
+  - Real-time status monitoring
 
 ## Quick Start
 
@@ -90,8 +106,30 @@ python -m app.main
 ### Multiple Videos
 1. Enter multiple YouTube URLs (one per line)
 2. Click "Upload Videos"
-3. Monitor batch processing status
-4. Interact with combined content through chat
+3. Monitor batch processing status in the enhanced console
+4. Videos are processed sequentially to avoid rate limits
+5. Interact with combined content through chat
+
+### File Upload API
+Upload video files directly via API:
+```bash
+curl -X POST "http://localhost:8000/api/upload-video" \
+  -H "accept: application/json" \
+  -H "Content-Type: multipart/form-data" \
+  -F "video_file=@your_video.mp4" \
+  -F "title=My Video" \
+  -F "description=Video description" \
+  -F "priority=1"
+```
+
+### URL Analysis API
+Analyze videos from URLs:
+```bash
+curl -X POST "http://localhost:8000/api/analyze-url" \
+  -H "accept: application/json" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "url=https://www.youtube.com/watch?v=VIDEO_ID&title=My Video&priority=1"
+```
 
 ## Architecture
 
@@ -119,6 +157,45 @@ python -m app.main
   - Content summarization
   - Natural language understanding
 
+## Configuration
+
+The system is configured via `config.yaml`. Key configuration sections:
+
+### File Cleanup (Janitor) Settings
+```yaml
+janitor:
+  enabled: true
+  schedule: "0 1 * * *"  # Daily at 1:00 AM (cron syntax)
+  cleanup_paths:
+    - "downloads"
+    - "temp"
+    - "transcripts"
+  file_patterns:
+    - "*.mp4"
+    - "*.wav"
+    - "*.txt"
+  retention_hours: 168  # 7 days
+  dry_run: false
+```
+
+### Storage Settings
+```yaml
+storage:
+  base_path: "./storage"
+  downloads_path: "downloads"
+  transcripts_path: "transcripts"
+```
+
+### API Settings
+```yaml
+api:
+  host: "0.0.0.0"
+  port: 8000
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+```
+
 ## API Documentation
 
 Access the interactive API documentation at:
@@ -126,11 +203,64 @@ Access the interactive API documentation at:
 http://localhost:8000/docs
 ```
 
-Key endpoints:
+### Core Video Processing Endpoints
 - `POST /analyze`: Process single video
 - `POST /analyze-playlist`: Process YouTube playlist
+- `POST /api/upload-video`: Upload and analyze video file
+- `POST /api/analyze-url`: Analyze video from URL
 - `POST /chat`: Interact with processed content
 - `GET /status/{video_id}`: Check processing status
+
+### Queue Management Endpoints
+- `GET /api/queue/status`: Get video processing queue status
+- `GET /api/queue/video/{video_id}`: Get specific video queue info
+
+### System Management Endpoints
+- `GET /api/janitor/status`: Check file cleanup service status
+- `POST /api/janitor/cleanup`: Trigger manual cleanup
+
+## Enhanced Features
+
+### Enhanced Console Features
+
+The web interface now includes an enhanced console log with:
+- **Scrollable output**: 300px height with smooth scrolling
+- **Color-coded log levels**: INFO (blue), SUCCESS (green), WARNING (yellow), ERROR (red), DEBUG (purple)
+- **Timestamps**: ISO format timestamps for all entries
+- **Auto-scroll toggle**: Enable/disable auto-scrolling to latest entries
+- **Clear console**: Button to clear all log entries
+- **Queue monitoring**: Real-time queue status display
+- **Memory management**: Automatic cleanup of old entries (max 1000)
+
+### Video Processing Queue
+
+Videos are now processed sequentially to avoid:
+- Rate limiting issues
+- System resource bottlenecks
+- Parallel processing conflicts
+
+Queue features:
+- **Priority processing**: Higher priority videos processed first
+- **Status tracking**: Real-time status updates for each video
+- **Error handling**: Failed videos don't block the queue
+- **Progress monitoring**: Track position and processing time
+
+### Automated File Cleanup (Janitor)
+
+The janitor service automatically manages storage:
+- **Cron-based scheduling**: Configurable cleanup schedules using cron syntax
+- **Selective cleanup**: Target specific file types and directories
+- **Retention policies**: Keep files for configurable time periods
+- **Dry run mode**: Test cleanup operations without deleting files
+- **Manual triggers**: API endpoints for on-demand cleanup
+
+### File Upload Support
+
+Direct file upload capabilities:
+- **Multi-format support**: Accept various video file formats
+- **API integration**: RESTful endpoints for programmatic uploads
+- **Priority queuing**: Set processing priority for uploaded files
+- **Metadata support**: Add titles and descriptions during upload
 
 ## Development
 
