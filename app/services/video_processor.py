@@ -467,7 +467,20 @@ class VideoProcessor:
 
     async def process_video(self, video: Video) -> Video:
         """Process a video by downloading it and generating a transcript."""
+        # Track resources that need cleanup
+        resources_to_cleanup = []
+        
         try:
+            logger.info(f"Starting to process video {video.id} from {video.url}")
+            
+            # Emit event for processing start
+            from app.services.event_streamer import emit_video_event, EventType
+            emit_video_event(
+                EventType.VIDEO_QUEUED, 
+                video.id, 
+                f"Starting to process video: {video.url}"
+            )
+            
             # Update status
             self.video_status[video.id] = {
                 "status": "processing",
@@ -480,15 +493,24 @@ class VideoProcessor:
                 "url": str(video.url)
             }
             
-            # Reset semaphore if it was leaked in a previous run
-            try:
-                if hasattr(self, 'semaphore'):
-                    # Create a new semaphore to ensure a clean state
-                    max_chunks = config.processing.max_parallel_chunks if hasattr(config, 'processing') and hasattr(config.processing, 'max_parallel_chunks') else 3
-                    self.semaphore = asyncio.Semaphore(max_chunks)
-                    logger.info(f"Reset semaphore with value {max_chunks}")
-            except Exception as e:
-                logger.warning(f"Failed to reset semaphore: {str(e)}")
+            # Reset and recreate semaphore for each video to prevent leaks
+            max_chunks = config.processing.max_parallel_chunks if hasattr(config, 'processing') and hasattr(config.processing, 'max_parallel_chunks') else 3
+            self.semaphore = asyncio.Semaphore(max_chunks)
+            resources_to_cleanup.append('semaphore')
+            logger.info(f"Created new semaphore with value {max_chunks}")
+            
+            # Create a new model manager instance for this video
+            if hasattr(self, 'model_manager'):
+                # Close existing model manager if there is one
+                try:
+                    await self.model_manager.close()
+                except Exception as e:
+                    logger.warning(f"Error closing previous model manager: {e}")
+            
+            # Create fresh model manager
+            self.model_manager = ModelManager(config)
+            resources_to_cleanup.append('model_manager')
+            logger.info("Created new model manager instance")
             
             # Validate transcription configuration before downloading anything
             try:
@@ -523,6 +545,14 @@ class VideoProcessor:
             if video.source == VideoSource.YOUTUBE:
                 try:
                     logger.info(f"Attempting to get YouTube transcript for video {video.id}")
+                    
+                    # Emit transcription start event
+                    from app.services.event_streamer import emit_video_event, EventType
+                    emit_video_event(
+                        EventType.TRANSCRIPTION_START,
+                        video.id,
+                        "Getting transcript from YouTube..."
+                    )
                     transcript_path = await self._get_youtube_transcript(video)
                     if transcript_path:
                         logger.info(f"Successfully retrieved YouTube transcript from {transcript_path}")
@@ -633,13 +663,87 @@ class VideoProcessor:
             self.video_status[video.id]["status"] = "completed"
             logger.info(f"Video {video.id} processed successfully")
 
+            # Emit video processing completion event
+            from app.services.event_streamer import emit_video_event, EventType
+            emit_video_event(
+                EventType.VIDEO_PROCESSING_COMPLETE, 
+                video.id, 
+                "Video processing completed successfully!"
+            )
+
             return video
 
+        except VideoProcessingError as e:
+            # This is an expected error, log it normally
+            logger.error(f"Video processing error: {str(e)}")
+            self.video_status[video.id]["status"] = "error"
+            self.video_status[video.id]["error"] = str(e)
+            
+            # Emit error event
+            from app.services.event_streamer import emit_video_event, EventType
+            emit_video_event(
+                EventType.ERROR_OCCURRED, 
+                video.id, 
+                f"Processing error: {str(e)}"
+            )
+            
+            raise
+            
         except Exception as e:
-            logger.error(f"Failed to process video: {str(e)}")
-            if video.id in self.video_status:
-                self.video_status[video.id]["status"] = "failed"
-            raise VideoProcessingError(f"Failed to process video: {str(e)}")
+            # Unexpected error, log with traceback
+            logger.exception(f"Unexpected error processing video {video.id}: {str(e)}")
+            self.video_status[video.id]["status"] = "error"
+            self.video_status[video.id]["error"] = str(e)
+            
+            # Emit error event
+            from app.services.event_streamer import emit_video_event, EventType
+            emit_video_event(
+                EventType.ERROR_OCCURRED, 
+                video.id, 
+                f"Unexpected error: {str(e)}"
+            )
+            
+            raise VideoProcessingError(f"Unexpected error: {str(e)}") from e
+            
+        finally:
+            # Always clean up resources
+            logger.info(f"Cleaning up resources for video {video.id}")
+            
+            # Clean up any open video/audio files
+            for temp_path in [v for v in getattr(self, '_temp_files', []) if v]:
+                try:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                        logger.debug(f"Removed temporary file: {temp_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp file {temp_path}: {e}")
+            
+            # Reset temp files list
+            self._temp_files = []
+            
+            # Clean up model resources
+            if hasattr(self, 'model_manager'):
+                try:
+                    await self.model_manager.close()
+                    logger.debug("Closed model manager resources")
+                except Exception as e:
+                    logger.warning(f"Error closing model manager: {e}")
+            
+            # Reset semaphores
+            if hasattr(self, 'semaphore'):
+                try:
+                    # Release any acquired permits
+                    current = self.semaphore._value
+                    max_value = getattr(config.processing, 'max_parallel_chunks', 3)
+                    for _ in range(max_value - current):
+                        try:
+                            self.semaphore.release()
+                        except ValueError:
+                            # Stop if we've released too many
+                            break
+                    logger.debug("Reset semaphore resources")
+                except Exception as e:
+                    logger.warning(f"Error resetting semaphore: {e}")
 
     async def process_playlist(self, url: str) -> List[str]:
         """Process a YouTube playlist and return list of video IDs"""

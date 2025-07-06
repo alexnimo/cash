@@ -5,7 +5,7 @@ import logging
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, UploadFile, File, Form, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -24,6 +24,9 @@ from app.api.routes import router as api_router
 from app.routes import settings_routes
 # Removed langtrace import
 from app.agents.technical_analysis_agent import TechnicalAnalysisAgent
+from app.services.janitor_service import janitor_service
+from app.services.video_queue import initialize_video_queue, get_video_queue
+from app.services.log_streamer import websocket_log_endpoint, get_log_streamer
 
 # Configure logging at the root level
 logging.basicConfig(
@@ -75,6 +78,10 @@ templates = Jinja2Templates(directory="app/templates")
 temp_dir = os.path.join("temp")
 os.makedirs(temp_dir, exist_ok=True)
 logger.info(f"Created temp directory at: {temp_dir}")
+
+# Initialize log streaming
+get_log_streamer()
+logger.info("Log streaming service initialized")
 
 # Test route to verify server is working
 @app.get("/api/test/ping")
@@ -234,7 +241,7 @@ async def get_video_status(video_id: str):
 
 @app.post("/analyze-playlist")
 async def analyze_playlist(request: PlaylistRequest, background_tasks: BackgroundTasks):
-    """Process a YouTube playlist"""
+    """Process a YouTube playlist with sequential video processing"""
     try:
         logger.info(f"Received playlist analysis request for URL: {request.url}")
         
@@ -244,8 +251,13 @@ async def analyze_playlist(request: PlaylistRequest, background_tasks: Backgroun
         # Extract video URLs from playlist
         video_urls = await video_processor.extract_playlist_urls(request.url)
         
-        # Create video objects and start processing
+        # Get video queue instance
+        video_queue = get_video_queue()
+        
+        # Create video objects and add to sequential processing queue
+        videos = []
         video_ids = []
+        
         for url in video_urls:
             video_id = str(uuid.uuid4())
             video = Video(
@@ -253,25 +265,23 @@ async def analyze_playlist(request: PlaylistRequest, background_tasks: Backgroun
                 url=url,
                 source=VideoSource.YOUTUBE
             )
-            
-            # Initialize status
-            video_status[video_id] = {
-                "status": VideoStatus.PENDING,
-                "error": None,
-                "progress": {
-                    "downloading": 0,
-                    "transcribing": 0,
-                    "analyzing": 0
-                }
-            }
-            
+            videos.append(video)
             video_ids.append(video_id)
-            background_tasks.add_task(process_video_background, video)
+        
+        # Add all videos to the sequential processing queue
+        queue_item_ids = await video_queue.add_videos_batch(videos)
+        
+        playlist_id = str(uuid.uuid4())
+        
+        logger.info(f"Added {len(videos)} videos to sequential processing queue for playlist {playlist_id}")
         
         return {
-            "playlist_id": str(uuid.uuid4()),
+            "playlist_id": playlist_id,
             "video_ids": video_ids,
-            "total_videos": len(video_ids)
+            "queue_item_ids": queue_item_ids,
+            "total_videos": len(video_ids),
+            "processing_mode": "sequential",
+            "message": f"Added {len(videos)} videos to processing queue. Videos will be processed one by one to avoid rate limits."
         }
         
     except Exception as e:
@@ -531,6 +541,211 @@ async def submit_report(
     except Exception as e:
         logger.error(f"Unexpected error in submit_report: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on app startup"""
+    logger.info("Starting application services...")
+    
+    # Initialize video queue
+    initialize_video_queue(video_status)
+    video_queue = get_video_queue()
+    await video_queue.start()
+    
+    # Start janitor service
+    await janitor_service.start()
+    
+    logger.info("Application startup complete")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up services on app shutdown"""
+    logger.info("Shutting down application services...")
+    
+    # Stop video queue
+    try:
+        video_queue = get_video_queue()
+        await video_queue.stop()
+    except Exception as e:
+        logger.error(f"Error stopping video queue: {e}")
+    
+    # Stop janitor service
+    await janitor_service.stop()
+    
+    logger.info("Application shutdown complete")
+
+# Janitor management endpoints
+@app.get("/api/janitor/status")
+async def get_janitor_status():
+    """Get janitor service status"""
+    return janitor_service.get_status()
+
+@app.post("/api/janitor/cleanup")
+async def trigger_manual_cleanup():
+    """Trigger manual cleanup"""
+    try:
+        result = await janitor_service.manual_cleanup()
+        return {"status": "success", "result": result}
+    except Exception as e:
+        logger.error(f"Manual cleanup failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Video Queue management endpoints
+@app.get("/api/queue/status")
+async def get_queue_status():
+    """Get video processing queue status"""
+    try:
+        video_queue = get_video_queue()
+        return video_queue.get_queue_status()
+    except Exception as e:
+        logger.error(f"Error getting queue status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/queue/video/{video_id}")
+async def get_video_queue_info(video_id: str):
+    """Get queue information for a specific video"""
+    try:
+        video_queue = get_video_queue()
+        queue_info = video_queue.get_video_queue_info(video_id)
+        if queue_info:
+            return queue_info
+        else:
+            raise HTTPException(status_code=404, detail="Video not found in queue")
+    except Exception as e:
+        logger.error(f"Error getting video queue info: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Video Upload and Analysis API Endpoint
+@app.post("/api/upload-video")
+async def upload_and_analyze_video(
+    video_file: UploadFile = File(...),
+    title: str = Form(None),
+    description: str = Form(None),
+    priority: int = Form(0)
+):
+    """Upload a video file and trigger analysis via the queue system"""
+    try:
+        # Validate file type
+        if not video_file.content_type or not video_file.content_type.startswith('video/'):
+            raise HTTPException(status_code=400, detail="File must be a video")
+        
+        # Generate unique ID for this video
+        video_id = str(uuid.uuid4())
+        
+        # Save uploaded file temporarily
+        settings = get_settings()
+        temp_dir = Path(settings.storage.base_path) / "temp"
+        temp_dir.mkdir(exist_ok=True)
+        
+        file_extension = Path(video_file.filename).suffix if video_file.filename else '.mp4'
+        temp_file_path = temp_dir / f"{video_id}{file_extension}"
+        
+        # Save the uploaded file
+        with open(temp_file_path, "wb") as buffer:
+            content = await video_file.read()
+            buffer.write(content)
+        
+        # Create video object
+        video = Video(
+            id=video_id,
+            title=title or video_file.filename or f"Uploaded Video {video_id[:8]}",
+            description=description or "Video uploaded via API",
+            url=str(temp_file_path),  # Use local file path
+            source=VideoSource.UPLOAD,
+            file_path=str(temp_file_path),
+            status=VideoStatus.PENDING
+        )
+        
+        # Add to processing queue
+        video_queue = get_video_queue()
+        queue_info = video_queue.add_video(video, priority=priority)
+        
+        logger.info(f"Video uploaded and queued: {video_id} - {video.title}")
+        
+        return {
+            "status": "success",
+            "message": "Video uploaded and queued for processing",
+            "video_id": video_id,
+            "queue_info": queue_info,
+            "file_size": len(content),
+            "filename": video_file.filename
+        }
+        
+    except Exception as e:
+        logger.error(f"Error uploading video: {str(e)}")
+        # Clean up temp file if it was created
+        if 'temp_file_path' in locals() and temp_file_path.exists():
+            temp_file_path.unlink()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/analyze-url")
+async def analyze_video_url(
+    url: str = Form(...),
+    title: str = Form(None),
+    description: str = Form(None),
+    priority: int = Form(0)
+):
+    """Analyze a video from a URL via the queue system"""
+    try:
+        # Log incoming parameters for debugging
+        logger.info(f"Received analyze-url request with: url='{url}', title='{title}', description='{description}'")
+        
+        # Validate URL - check that it's not empty
+        if not url or url.strip() == "":
+            logger.error("Empty URL provided")
+            raise HTTPException(status_code=400, detail="URL cannot be empty")
+        
+        # Clean the URL
+        url = url.strip()
+        
+        # Try to determine if it's a YouTube URL and set source accordingly
+        is_youtube = 'youtube.com' in url or 'youtu.be' in url
+        source = VideoSource.YOUTUBE if is_youtube else VideoSource.URL
+        
+        # Generate unique ID for this video
+        video_id = str(uuid.uuid4())
+        
+        # Create video object
+        video = Video(
+            id=video_id,
+            title=title or f"Video from {'YouTube' if is_youtube else 'URL'} {video_id[:8]}",
+            description=description or f"Video from URL: {url}",
+            url=url,
+            source=source,
+            status=VideoStatus.PENDING
+        )
+        
+        logger.info(f"Created video object with id={video_id}, source={source}")
+        
+        # Add to processing queue
+        video_queue = get_video_queue()
+        queue_info = await video_queue.add_video(video)
+        
+        logger.info(f"Video URL queued for analysis: {video_id} - {url}")
+        
+        return {
+            "status": "success",
+            "message": "Video URL queued for analysis",
+            "video_id": video_id,
+            "queue_info": queue_info,
+            "url": url
+        }
+        
+    except Exception as e:
+        logger.error(f"Error queueing video URL: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# WebSocket endpoint for real-time log streaming
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """WebSocket endpoint for streaming backend logs to frontend console."""
+    await websocket_log_endpoint(websocket)
+
+@app.websocket("/ws/events")
+async def websocket_events(websocket: WebSocket):
+    """WebSocket endpoint for streaming video processing events to frontend."""
+    from app.services.event_streamer import websocket_event_endpoint
+    await websocket_event_endpoint(websocket)
 
 if __name__ == "__main__":
     import uvicorn

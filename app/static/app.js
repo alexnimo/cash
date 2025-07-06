@@ -273,29 +273,53 @@ document.addEventListener('DOMContentLoaded', () => {
     // API interaction functions
     async function processVideo(url) {
         try {
+            // Validate URL isn't empty
+            if (!url || url.trim() === '') {
+                throw new Error('URL cannot be empty');
+            }
+            
+            // Clean the URL
+            url = url.trim();
+            
+            // Add protocol if missing
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                url = 'https://' + url;
+            }
+            
             console.log('Sending URL to backend:', url);
-            const response = await fetch(`${API_BASE_URL}analyze`, {
+            logToConsole(`Starting video analysis for: ${url}`, 'info');
+            
+            // Use FormData to match the new API endpoint
+            const formData = new FormData();
+            formData.append('url', url);
+            
+            const response = await fetch(`${API_BASE_URL}api/analyze-url`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ url }),
+                body: formData
             });
             
             if (!response.ok) {
                 const errorData = await response.json();
                 if (response.status === 429) {
                     showError('API rate limit exceeded. Please try again later.');
+                    logToConsole('Rate limit exceeded', 'error');
                     return null;
                 }
                 throw new Error(errorData.detail || 'Failed to process video');
             }
             
             const data = await response.json();
-            updateStatus(`Processing video: ${url}`, data.video_id);
+            logToConsole(`Video queued successfully: ${data.video_id}`, 'success');
+            logToConsole(`Queue position: ${data.queue_info.position}`, 'info');
+            updateStatus(`Video queued for processing: ${url}`, data.video_id);
+            
+            // Start monitoring the queue and video processing
+            startQueueMonitoring();
             pollVideoStatus(data.video_id);
+            
         } catch (error) {
             console.error('Error processing video:', error);
+            logToConsole(`Error processing video: ${error.message}`, 'error');
             updateStatus(`Error processing video: ${error.message}`, null, true);
         }
     }
@@ -674,4 +698,289 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     `;
     document.head.appendChild(style);
+    
+    // Initialize enhanced console logging with proper timing
+    setTimeout(() => {
+        initializeEnhancedConsole();
+        
+        // Start queue status monitoring after console is ready
+        setTimeout(() => {
+            startQueueMonitoring();
+        }, 500);
+    }, 100);
 });
+
+// Enhanced Console Logging System
+let autoScroll = true;
+let consoleLog = null;
+let logWebSocket = null;
+let wsReconnectAttempts = 0;
+const maxReconnectAttempts = 5;
+
+function initializeEnhancedConsole() {
+    consoleLog = document.getElementById('consoleLog');
+    
+    if (!consoleLog) {
+        console.error('Console log element not found!');
+        return;
+    }
+    
+    // Clear any existing content
+    consoleLog.innerHTML = '';
+    
+    // Clear console button
+    document.getElementById('clearConsole')?.addEventListener('click', clearConsole);
+    
+    // Toggle auto-scroll button
+    const toggleBtn = document.getElementById('toggleAutoScroll');
+    toggleBtn?.addEventListener('click', function() {
+        autoScroll = !autoScroll;
+        toggleBtn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+        toggleBtn.className = autoScroll ? 
+            'px-3 py-1 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded' :
+            'px-3 py-1 text-sm bg-gray-500 hover:bg-gray-600 text-white rounded';
+    });
+    
+    // Log initialization message
+    logToConsole('Video analyzer console initialized', 'info');
+    logToConsole('Enhanced console initialized', 'info');
+    
+    // Initialize WebSocket for log streaming
+    initializeLogWebSocket();
+}
+
+function logToConsole(message, level = 'info', timestamp = null) {
+    // Ensure console log element is available
+    if (!consoleLog) {
+        consoleLog = document.getElementById('consoleLog');
+        if (!consoleLog) {
+            console.warn('Console log element not found');
+            return;
+        }
+    }
+    
+    const entry = document.createElement('div');
+    entry.className = `console-entry ${level}`;
+    
+    const ts = timestamp || new Date().toISOString().substring(0, 19);
+    const levelText = level.toUpperCase().padEnd(7);
+    
+    entry.innerHTML = `
+        <span class="timestamp">[${ts}]</span>
+        <span class="level">${levelText}</span>
+        <span class="message">${escapeHtml(message)}</span>
+    `;
+    
+    consoleLog.appendChild(entry);
+    
+    // Auto-scroll to bottom if enabled
+    if (autoScroll) {
+        setTimeout(() => {
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }, 10);
+    }
+    
+    // Limit console entries to prevent memory issues
+    const maxEntries = 1000;
+    const entries = consoleLog.querySelectorAll('.console-entry');
+    if (entries.length > maxEntries) {
+        entries[0].remove();
+    }
+}
+
+// Helper function to escape HTML
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function clearConsole() {
+    if (consoleLog) {
+        consoleLog.innerHTML = '';
+        logToConsole('Console cleared', 'info');
+    }
+}
+
+// WebSocket Log Streaming Functions
+function initializeLogWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/events`;
+    
+    try {
+        logWebSocket = new WebSocket(wsUrl);
+        
+        logWebSocket.onopen = function(event) {
+            logToConsole('Event streaming connected', 'success');
+            wsReconnectAttempts = 0;
+        };
+        
+        logWebSocket.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                
+                // Handle different message types
+                if (data.type === 'log') {
+                    logToConsole(data.data.message, data.data.level, data.data.timestamp);
+                } 
+                else if (data.type === 'event') {
+                    // Handle specific video processing events
+                    const eventType = data.event_type;
+                    const message = data.message;
+                    const videoId = data.video_id;
+                    
+                    // Format message based on event type
+                    let level = 'info';
+                    let prefix = '';
+                    
+                    switch (eventType) {
+                        case 'video_queued':
+                            prefix = '🎬 ';
+                            break;
+                        case 'transcription_start':
+                        case 'transcription_progress':
+                        case 'transcription_complete':
+                            prefix = '🗣️ ';
+                            break;
+                        case 'image_analysis_start':
+                        case 'image_analysis_progress':
+                        case 'image_analysis_complete':
+                            prefix = '🖼️ ';
+                            break;
+                        case 'content_analysis_start':
+                        case 'content_analysis_complete':
+                            prefix = '🧠 ';
+                            break;
+                        case 'video_processing_complete':
+                            prefix = '✅ ';
+                            level = 'success';
+                            break;
+                        case 'error_occurred':
+                            prefix = '❌ ';
+                            level = 'error';
+                            break;
+                    }
+                    
+                    // Log the event with appropriate formatting
+                    logToConsole(`${prefix}[${videoId}] ${message}`, level, data.timestamp);
+                    
+                    // If this is a completion event, refresh video status
+                    if (eventType === 'video_processing_complete') {
+                        refreshVideoStatus(videoId);
+                    }
+                }
+                // Handle connection messages
+                else if (data.type === 'connection') {
+                    logToConsole(data.message, 'success', data.timestamp);
+                }
+                // Handle ping/pong for keepalive
+                else if (data.type === 'ping') {
+                    logWebSocket.send(JSON.stringify({type: 'pong'}));
+                }
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
+            }
+        };
+        
+        logWebSocket.onclose = function(event) {
+            logToConsole('Log streaming disconnected', 'warning');
+            
+            // Attempt to reconnect if not too many attempts
+            if (wsReconnectAttempts < maxReconnectAttempts) {
+                wsReconnectAttempts++;
+                logToConsole(`Attempting to reconnect (${wsReconnectAttempts}/${maxReconnectAttempts})...`, 'info');
+                setTimeout(() => {
+                    initializeLogWebSocket();
+                }, 2000 * wsReconnectAttempts); // Exponential backoff
+            } else {
+                logToConsole('Max reconnection attempts reached. Manual refresh may be needed.', 'error');
+            }
+        };
+        
+        logWebSocket.onerror = function(error) {
+            logToConsole('WebSocket error occurred', 'error');
+            console.error('WebSocket error:', error);
+        };
+        
+    } catch (error) {
+        logToConsole('Failed to initialize log streaming', 'error');
+        console.error('WebSocket initialization error:', error);
+    }
+}
+
+function closeLogWebSocket() {
+    if (logWebSocket) {
+        logWebSocket.close();
+        logWebSocket = null;
+    }
+}
+
+// Queue Status Monitoring
+let queueMonitorInterval = null;
+
+function startQueueMonitoring() {
+    // Initial load
+    updateQueueStatus();
+    
+    // Update every 5 seconds
+    queueMonitorInterval = setInterval(updateQueueStatus, 5000);
+}
+
+async function updateQueueStatus() {
+    try {
+        const response = await fetch('/api/queue/status');
+        if (response.ok) {
+            const queueData = await response.json();
+            displayQueueStatus(queueData);
+        } else {
+            throw new Error(`Queue status request failed: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error updating queue status:', error);
+        document.getElementById('queueInfo').innerHTML = 
+            '<span class="text-red-600">Error loading queue status</span>';
+    }
+}
+
+function displayQueueStatus(queueData) {
+    const queueInfo = document.getElementById('queueInfo');
+    if (!queueInfo) return;
+    
+    // Handle both possible API response formats with fallbacks
+    const queue_size = queueData.queue_size ?? queueData.size ?? 0;
+    const total_processed = queueData.total_processed ?? queueData.processed ?? 0;
+    const is_processing = queueData.is_processing ?? queueData.processing ?? false;
+    const current_video = queueData.current_video ?? queueData.current ?? null;
+    const status = queueData.status ?? (is_processing ? 'Processing' : 'Idle');
+    
+    let html = `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div>
+                <span class="font-medium">Queue Size:</span>
+                <span class="ml-1 px-2 py-1 bg-blue-100 text-blue-800 rounded">${queue_size}</span>
+            </div>
+            <div>
+                <span class="font-medium">Total Processed:</span>
+                <span class="ml-1 px-2 py-1 bg-green-100 text-green-800 rounded">${total_processed}</span>
+            </div>
+            <div>
+                <span class="font-medium">Status:</span>
+                <span class="ml-1 px-2 py-1 rounded ${
+                    is_processing ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'
+                }">${status}</span>
+            </div>
+            <div>
+                <span class="font-medium">Current:</span>
+                <span class="ml-1 text-xs">${current_video || 'None'}</span>
+            </div>
+        </div>
+    `;
+    
+    queueInfo.innerHTML = html;
+    
+    // Log queue status changes
+    if (is_processing && current_video) {
+        const shortId = current_video.substring(0, 8);
+        logToConsole(`Processing video: ${shortId}...`, 'info');
+    }
+}

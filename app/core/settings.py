@@ -141,7 +141,16 @@ class FreeimageSettings(BaseModel):
     api_key: str = Field(default_factory=lambda: os.getenv("FREEIMAGE_API_KEY", ""))
 
 class TranscriptGenerationSettings(BaseModel):
-    max_chunk_duration_minutes: int = Field(default=30)  # Default to 30 minutes
+    max_chunk_duration_minutes: int = Field(default=30)
+
+class JanitorConfig(BaseModel):
+    """Configuration for the janitor (file cleanup) service"""
+    enabled: bool = Field(default=True)
+    schedule: str = Field(default="0 1 * * *")  # Daily at 1:00 AM
+    cleanup_paths: List[str] = Field(default=["downloads", "temp", "transcripts"])
+    file_patterns: List[str] = Field(default=["*.mp4", "*.wav", "*.txt"])
+    retention_hours: int = Field(default=168)  # 7 days
+    dry_run: bool = Field(default=False)  # Default to 30 minutes
 
 class Settings(BaseModel):
     app_name: str = "Video Analyzer"
@@ -157,6 +166,7 @@ class Settings(BaseModel):
     notion: NotionConfig
     freeimage: FreeimageSettings = Field(default_factory=FreeimageSettings)
     transcript_generation: TranscriptGenerationSettings = Field(default_factory=TranscriptGenerationSettings)
+    janitor: JanitorConfig = Field(default_factory=JanitorConfig)
 
 _settings_instance = None
 
