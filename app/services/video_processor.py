@@ -5,9 +5,27 @@ from pathlib import Path
 import logging
 import xml.etree.ElementTree
 import xml.parsers.expat
+import yt_dlp
+from datetime import datetime
+import tempfile
+import shutil
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+import re
+from pytubefix import YouTube
+from pytubefix.exceptions import PytubeFixError
+# Removed langtrace import
+from app.utils.path_utils import get_storage_subdir, get_storage_path
+import google.generativeai as genai
+from google.generativeai.types import GenerateContentResponse
+from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata, VideoAnalysis
+from app.core.unified_config import get_config
+from app.services.model_manager import ModelManager
+from app.services.model_config import configure_models
+from app.services.content_analyzer import ContentAnalyzer
+from app.services.errors import VideoProcessingError
 import math
 import uuid
-import shutil
+import json
 from moviepy import VideoFileClip, AudioFileClip
 import yt_dlp
 import json
@@ -26,12 +44,21 @@ from app.services.content_analyzer import ContentAnalyzer
 from app.services.errors import VideoProcessingError
 import re
 
+# Use MoviePy for audio processing instead of pydub for Python 3.13 compatibility
+try:
+    from moviepy import AudioFileClip
+    AUDIO_PROCESSING_AVAILABLE = True
+except ImportError:
+    AUDIO_PROCESSING_AVAILABLE = False
+    AudioFileClip = None
+
+# Keep pydub import for fallback (if available)
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
 except ImportError:
     PYDUB_AVAILABLE = False
-    AudioSegment = None  # Define for type hinting
+    AudioSegment = None
 
 class TranscriptSegment:
     """Represents a segment of a transcript with timestamp information."""
@@ -334,52 +361,48 @@ class VideoProcessor:
 
             logger.info(f"Extracted YouTube video ID: {video_id}")
 
-            # Get available transcripts
-            logger.info("Fetching available transcripts...")
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            # Create API instance
+            api = YouTubeTranscriptApi()
             
-            # Log available transcripts
-            available_transcripts = list(transcript_list)
-            logger.info(f"Found {len(available_transcripts)} available transcripts:")
-            for t in available_transcripts:
-                logger.info(f"- Language: {t.language_code}, Generated: {t.is_generated}")
-            
-            transcript = None
-            transcript_language = None
-            
+            # Try to get English transcript first
+            logger.info("Trying to get English transcript...")
             try:
-                # First try to get English transcript (manual or generated)
-                logger.info("Trying to get English transcript...")
-                transcript = transcript_list.find_transcript(['en'])
+                fetched_transcript = api.fetch(video_id, languages=['en'])
+                # The fetch method already returns a FetchedTranscript with transcript data
+                transcript_data = fetched_transcript
                 transcript_language = 'en'
                 logger.info("Found English transcript")
             except NoTranscriptFound:
+                # If English not available, try any language
                 logger.info("No English transcript found, trying any available transcript...")
-                # Get all available transcripts
-                available = list(transcript_list)
-                if available:
-                    # Use the first available transcript
-                    transcript = available[0]
-                    transcript_language = transcript.language_code
-                    logger.info(f"Using available transcript in language: {transcript_language}")
-                else:
+                try:
+                    # List all available transcripts first
+                    transcript_list = api.list(video_id)
+                    if transcript_list:
+                        # Get the first available transcript
+                        available = list(transcript_list)
+                        if available:
+                            first_transcript = available[0]
+                            transcript_data = first_transcript.fetch()
+                            transcript_language = first_transcript.language_code
+                            logger.info(f"Using available transcript in language: {transcript_language}")
+                        else:
+                            logger.warning("No transcripts available")
+                            return None
+                    else:
+                        logger.warning("No transcripts available")
+                        return None
+                except NoTranscriptFound:
                     logger.warning("No transcripts available")
                     return None
-
-            if transcript:
-                # Fetch the transcript data with robust error handling
-                logger.info(f"Fetching transcript data in {transcript_language}...")
-                try:
-                    transcript_data = transcript.fetch()
-                    logger.info(f"Got transcript with {len(transcript_data)} segments")
-                except (xml.etree.ElementTree.ParseError, xml.parsers.expat.ExpatError) as xml_err:
-                    logger.warning(f"XML parsing error when fetching transcript: {xml_err}")
-                    logger.info("Continuing with audio extraction as fallback")
-                    return None
                 except Exception as e:
-                    logger.warning(f"Error fetching transcript data: {e}")
-                    logger.info("Continuing with audio extraction as fallback")
+                    logger.error(f"Error getting any transcript: {str(e)}")
                     return None
+
+            if transcript_data:
+                # Process the transcript data
+                logger.info(f"Processing transcript data in {transcript_language}...")
+                logger.info(f"Got transcript with {len(transcript_data)} segments")
                 
                 # Handle FetchedTranscriptSnippet objects
                 # Extract data in a way that works with both dictionary-like objects and FetchedTranscriptSnippet objects
@@ -446,24 +469,32 @@ class VideoProcessor:
             logger.error(f"Error getting YouTube transcript: {str(e)}", exc_info=True)
             return None
             
-    async def __del__(self):
+    def __del__(self):
+        """Synchronous cleanup - async cleanup should be done explicitly via cleanup() method"""
         try:
-            # Close any open resources
-            if hasattr(self, 'model_manager'):
-                await self.model_manager.close()
-            
-            # Clean up any semaphores
+            # Clean up any semaphores synchronously
             if hasattr(self, 'semaphore'):
                 # Release any acquired semaphores
-                for _ in range(self.semaphore._value):
+                for _ in range(getattr(self.semaphore, '_value', 0)):
                     try:
                         self.semaphore.release()
-                    except ValueError:
-                        # Stop if we've released too many
+                    except (ValueError, AttributeError):
+                        # Stop if we've released too many or semaphore is gone
                         break
-                logger.info("Cleaned up semaphores during VideoProcessor deletion")
+                logger.debug("Cleaned up semaphores during VideoProcessor deletion")
         except Exception as e:
             logger.error(f"Error in VideoProcessor cleanup: {e}")
+    
+    async def cleanup(self):
+        """Async cleanup method for proper resource management"""
+        try:
+            # Close any open resources
+            if hasattr(self, 'model_manager') and self.model_manager is not None:
+                if hasattr(self.model_manager, 'close'):
+                    await self.model_manager.close()
+            logger.debug("VideoProcessor async cleanup completed")
+        except Exception as e:
+            logger.error(f"Error in VideoProcessor async cleanup: {e}")
 
     async def process_video(self, video: Video) -> Video:
         """Process a video by downloading it and generating a transcript."""
@@ -783,8 +814,28 @@ class VideoProcessor:
             video_url = str(video.url)
             logger.info(f"Downloading video from URL: {video_url}")
             
-            # First extract metadata without downloading
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            # Enhanced configuration for metadata extraction to avoid bot detection
+            metadata_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': False,
+                'nocheckcertificate': True,
+                # Add headers to avoid bot detection
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Accept-Encoding': 'gzip,deflate',
+                    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
+                    'Connection': 'keep-alive',
+                },
+                # Additional options to avoid restrictions
+                'extractor_retries': 3,
+                'fragment_retries': 3,
+                'retry_sleep_functions': {'http': lambda n: min(4 ** n, 60)},
+            }
+            
+            with yt_dlp.YoutubeDL(metadata_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 if info is None:
                     raise VideoProcessingError("Failed to get video metadata")
@@ -829,16 +880,41 @@ class VideoProcessor:
                 
                 logger.info(f"Processed metadata - Channel: {channel_name}, Title: {video.metadata.video_title}")
             
-            # Download video only
+            # Download video with comprehensive anti-bot measures
             video_opts = {
-                'format': 'bestvideo[height<=?1080]/mp4',  # Get best video up to 1080p
+                # Most flexible format selection - try anything available
+                'format': 'worst/best',  # Start with worst quality to avoid premium formats
                 'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
                 'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
                 'quiet': True,
                 'no_warnings': True,
                 'ignoreerrors': False,
                 'nocheckcertificate': True,
-                'source_address': '0.0.0.0',  # Force ipv4  # Use cookies file
+                # Enhanced headers to mimic real browser
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0',
+                },
+                # Aggressive retry and delay settings
+                'extractor_retries': 5,
+                'fragment_retries': 5,
+                'retry_sleep_functions': {'http': lambda n: min(2 ** n, 30)},
+                'sleep_interval': 1,
+                'max_sleep_interval': 5,
+                # Additional YouTube-specific options
+                'youtube_include_dash_manifest': False,
+                'writesubtitles': False,
+                'writeautomaticsub': False,
             }
             
             # Download video
@@ -858,8 +934,133 @@ class VideoProcessor:
                 return video_path
             
         except Exception as e:
-            logger.error(f"Failed to download video: {str(e)}", exc_info=True)
-            raise VideoProcessingError(f"Failed to download video: {str(e)}")
+            logger.error(f"Failed to download video with yt-dlp: {str(e)}")
+            fallback_triggers = [
+                "403",
+                "Requested format is not available", 
+                "Failed to extract any player response",
+                "Sign in to confirm your age",
+                "Private video",
+                "Video unavailable"
+            ]
+            
+            should_fallback = any(trigger in str(e) for trigger in fallback_triggers)
+            
+            if should_fallback:
+                logger.info(f"Attempting fallback to pytubefix due to yt-dlp failure: {str(e)}")
+                try:
+                    return await self._download_video_pytubefix_fallback(video)
+                except Exception as fallback_error:
+                    logger.error(f"Pytubefix fallback also failed: {str(fallback_error)}")
+                    raise VideoProcessingError(f"Both yt-dlp and pytubefix failed. yt-dlp: {str(e)}, pytubefix: {str(fallback_error)}")
+            else:
+                raise VideoProcessingError(f"Failed to download video: {str(e)}")
+
+    async def _download_video_pytubefix_fallback(self, video: Video) -> str:
+        """Fallback method using pytubefix when yt-dlp fails"""
+        try:
+            video_url = str(video.url)
+            logger.info(f"Using pytubefix fallback for URL: {video_url}")
+            
+            # Create YouTube object with OAuth for better reliability
+            yt = YouTube(
+                video_url,
+                use_oauth=False,  # Start without OAuth, can be enabled if needed
+                allow_oauth_cache=True
+            )
+            
+            # Extract metadata if not already done
+            if not video.metadata:
+                # Get channel name from various sources
+                channel_name = (
+                    getattr(yt, 'author', None) or 
+                    getattr(yt, 'channel_name', None) or
+                    ''
+                )
+                
+                video.metadata = VideoMetadata(
+                    title=yt.title or '',
+                    duration=float(yt.length or 0),
+                    resolution=(
+                        getattr(yt.streams.get_highest_resolution(), 'resolution', '720p').replace('p', ''),
+                        720  # Default height
+                    ),
+                    format='mp4',
+                    size_bytes=0,  # Will be updated after download
+                    channel_name=channel_name,
+                    video_title=yt.title or ''
+                )
+                
+                logger.info(f"Extracted metadata with pytubefix - Channel: {channel_name}, Title: {video.metadata.video_title}")
+            
+            # Get the best available stream (prefer mp4)
+            stream = None
+            
+            # Try different stream selection strategies
+            strategies = [
+                lambda: yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first(),
+                lambda: yt.streams.filter(adaptive=True, file_extension='mp4', only_video=True).order_by('resolution').desc().first(),
+                lambda: yt.streams.filter(file_extension='mp4').order_by('resolution').desc().first(),
+                lambda: yt.streams.get_highest_resolution(),
+                lambda: yt.streams.first()
+            ]
+            
+            for i, strategy in enumerate(strategies):
+                try:
+                    stream = strategy()
+                    if stream:
+                        logger.info(f"Selected stream using strategy {i+1}: {stream.resolution} {stream.mime_type}")
+                        break
+                except Exception as strategy_error:
+                    logger.debug(f"Strategy {i+1} failed: {strategy_error}")
+                    continue
+            
+            if not stream:
+                raise VideoProcessingError("No suitable video stream found with pytubefix")
+            
+            # Download the video
+            output_path = str(self.video_dir)
+            filename = f"{video.id}.{stream.subtype}"
+            
+            logger.info(f"Downloading with pytubefix: {stream.resolution} {stream.mime_type}")
+            
+            # Download with progress callback
+            def progress_callback(stream, chunk, bytes_remaining):
+                total_size = stream.filesize
+                bytes_downloaded = total_size - bytes_remaining
+                percentage = int((bytes_downloaded / total_size) * 100)
+                self._update_download_progress(video.id, {
+                    'status': 'downloading',
+                    '_percent_str': f'{percentage}%',
+                    'downloaded_bytes': bytes_downloaded,
+                    'total_bytes': total_size
+                })
+            
+            # Set progress callback
+            yt.register_on_progress_callback(progress_callback)
+            
+            # Download the file
+            downloaded_file = stream.download(
+                output_path=output_path,
+                filename=filename
+            )
+            
+            if not os.path.exists(downloaded_file):
+                raise VideoProcessingError(f"Downloaded file not found: {downloaded_file}")
+            
+            # Update metadata with actual file size
+            if video.metadata:
+                video.metadata.size_bytes = os.path.getsize(downloaded_file)
+            
+            logger.info(f"Successfully downloaded video with pytubefix to: {downloaded_file}")
+            return downloaded_file
+            
+        except PytubeFixError as e:
+            logger.error(f"PytubeFixError: {str(e)}")
+            raise VideoProcessingError(f"Pytubefix error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to download video with pytubefix: {str(e)}", exc_info=True)
+            raise VideoProcessingError(f"Pytubefix fallback failed: {str(e)}")
 
     async def _validate_video_file(self, file_path: str) -> bool:
         """Validate video file using ffmpeg"""
@@ -1060,10 +1261,10 @@ class VideoProcessor:
                 base_delay = 1  # Start with 1 second delay
                 max_retries = 3
                 
-                # Check if pydub is available for audio duration analysis
-                if not PYDUB_AVAILABLE:
-                    logger.error("pydub library is not installed. Cannot process audio duration or split long files. Install with 'pip install pydub'")
-                    raise ImportError("pydub is required for audio processing")
+                # Check if audio processing is available
+                if not AUDIO_PROCESSING_AVAILABLE:
+                    logger.error("Audio processing library is not available. MoviePy AudioFileClip is required for audio processing")
+                    raise ImportError("Audio processing library is required for audio processing")
 
                 if not Path(audio_path).exists():
                     logger.error(f"Audio file not found at path: {audio_path}")
@@ -1073,11 +1274,13 @@ class VideoProcessor:
                 logger.info(f"Maximum audio chunk duration set to {config.get('transcript_generation', 'max_chunk_duration_minutes', default=30)} minutes ({MAX_CHUNK_DURATION_MS} ms).")
 
                 try:
-                    audio_segment = await asyncio.to_thread(AudioSegment.from_file, audio_path)
-                    duration_ms = len(audio_segment)
+                    # Use MoviePy to get audio duration
+                    audio_clip = await asyncio.to_thread(AudioFileClip, audio_path)
+                    duration_ms = int(audio_clip.duration * 1000)  # Convert seconds to milliseconds
                     logger.info(f"Audio duration: {duration_ms / 1000:.2f} seconds")
+                    audio_clip.close()  # Important to close the clip
                 except Exception as e:
-                    logger.error(f"Failed to load audio file with pydub: {e}")
+                    logger.error(f"Failed to load audio file with MoviePy: {e}")
                     return None
 
                 # --- Audio Processing Logic --- 
@@ -1135,8 +1338,8 @@ class VideoProcessor:
                             except Exception as delete_err:
                                 logger.warning(f"Failed to delete uploaded single audio file {audio_file.name}: {delete_err}")
                 else:
-                    # --- Process long audio files via segmentation --- 
-                    logger.info(f"Audio duration exceeds limit ({duration_ms} > {MAX_CHUNK_DURATION_MS} ms). Splitting into chunks.")
+                    # --- Process long audio files via segmentation using MoviePy --- 
+                    logger.info(f"Audio duration exceeds limit ({duration_ms} > {MAX_CHUNK_DURATION_MS} ms). Splitting into chunks using MoviePy.")
                     num_chunks = math.ceil(duration_ms / MAX_CHUNK_DURATION_MS)
                     logger.info(f"Splitting audio into {num_chunks} chunks.")
                     transcript_parts = []
@@ -1146,21 +1349,30 @@ class VideoProcessor:
                     try:
                         chunk_temp_dir.mkdir(parents=True, exist_ok=True)
                         logger.info(f"Created temporary chunk directory: {chunk_temp_dir}")
+                        
+                        # Load the full audio clip once
+                        full_audio_clip = await asyncio.to_thread(AudioFileClip, audio_path)
 
                         for i in range(num_chunks):
-                            start_ms = i * MAX_CHUNK_DURATION_MS
-                            end_ms = min((i + 1) * MAX_CHUNK_DURATION_MS, duration_ms)
-                            logger.info(f"Processing chunk {i+1}/{num_chunks} ({start_ms/1000:.2f}s to {end_ms/1000:.2f}s)")
+                            start_seconds = (i * MAX_CHUNK_DURATION_MS) / 1000
+                            end_seconds = min(((i + 1) * MAX_CHUNK_DURATION_MS) / 1000, duration_ms / 1000)
+                            logger.info(f"Processing chunk {i+1}/{num_chunks} ({start_seconds:.2f}s to {end_seconds:.2f}s)")
                             
-                            chunk_segment = audio_segment[start_ms:end_ms]
                             chunk_filename = f"{base_filename}_chunk_{i+1}.wav"
                             chunk_path = chunk_temp_dir / chunk_filename
                             uploaded_chunk_file = None
 
                             try:
-                                # Export chunk
-                                await asyncio.to_thread(chunk_segment.export, chunk_path, format="wav")
+                                # Create audio subclip using MoviePy
+                                chunk_clip = full_audio_clip.subclipped(start_seconds, end_seconds)
+                                
+                                # Export chunk using MoviePy
+                                await asyncio.to_thread(chunk_clip.write_audiofile, str(chunk_path), 
+                                                       verbose=False, logger=None)
                                 logger.info(f"Exported chunk {i+1} to {chunk_path}")
+                                
+                                # Close the chunk clip to free memory
+                                chunk_clip.close()
 
                                 # Upload chunk
                                 uploaded_chunk_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
@@ -1203,6 +1415,14 @@ class VideoProcessor:
                         logger.error(f"Error during audio chunking process: {e}")
                         raw_text = None # Indicate failure
                     finally:
+                        # Close the full audio clip
+                        if 'full_audio_clip' in locals():
+                            try:
+                                full_audio_clip.close()
+                                logger.info("Closed full audio clip")
+                            except Exception as close_err:
+                                logger.warning(f"Error closing full audio clip: {close_err}")
+                        
                         # Cleanup temporary directory
                         if chunk_temp_dir.exists():
                             try:
