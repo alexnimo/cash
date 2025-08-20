@@ -1,5 +1,6 @@
 # Core dependencies
 yt-dlp>=2023.12.30
+pytubefix>=6.10.2
 moviepy>=1.0.3
 pydantic>=2.5.2
 fastapi>=0.104.1
