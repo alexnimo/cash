@@ -935,9 +935,19 @@ class VideoProcessor:
             
         except Exception as e:
             logger.error(f"Failed to download video with yt-dlp: {str(e)}")
-            # Check if this is a 403 error or format availability issue
-            if "403" in str(e) or "Requested format is not available" in str(e):
-                logger.info("Attempting fallback to pytubefix due to yt-dlp failure")
+            fallback_triggers = [
+                "403",
+                "Requested format is not available", 
+                "Failed to extract any player response",
+                "Sign in to confirm your age",
+                "Private video",
+                "Video unavailable"
+            ]
+            
+            should_fallback = any(trigger in str(e) for trigger in fallback_triggers)
+            
+            if should_fallback:
+                logger.info(f"Attempting fallback to pytubefix due to yt-dlp failure: {str(e)}")
                 try:
                     return await self._download_video_pytubefix_fallback(video)
                 except Exception as fallback_error:
