@@ -7,11 +7,12 @@ import google.generativeai as genai
 from app.core.settings import get_settings
 from app.tools.notion_tool_v2 import NotionTool
 from app.utils.langtrace_utils import get_langtrace, trace_llm_call, init_langtrace
+from app.core.data_preservation import DataPreservationMixin, StructuredDataSchema, DataValidator
 
 logger = logging.getLogger(__name__)
 
 
-class TechnicalAnalysisAgent:
+class TechnicalAnalysisAgent(DataPreservationMixin):
     def __init__(self, tools=None, llm=None, memory=None, config=None):
         """Initialize the TechnicalAnalysisAgent."""
         self.settings = get_settings()
@@ -138,74 +139,131 @@ class TechnicalAnalysisAgent:
             logger.error(f"Error analyzing frames: {str(e)}")
             return [], "Error analyzing technical charts."
 
+    def create_structured_analysis(self, raw_data: Dict) -> Dict:
+        """Create structured analysis preserving all key data"""
+        structured_data = {}
+        
+        for section in raw_data.get('sections', []):
+            if 'stocks' in section and section['stocks']:
+                symbol = section['stocks'][0].upper()
+                
+                # Create structured schema
+                schema = StructuredDataSchema.create_stock_analysis_schema(symbol, section)
+                
+                # Extract and preserve price data
+                price_data = self._extract_price_levels(section)
+                if price_data:
+                    schema['stock_analysis']['price_data']['key_levels'].update(price_data)
+                
+                # Extract technical indicators
+                technical_data = self._extract_technical_indicators(section)
+                if technical_data:
+                    schema['stock_analysis']['technical_analysis'].update({
+                        'indicators': technical_data.get('indicators', []),
+                        'patterns': technical_data.get('patterns', []),
+                        'timeframes_mentioned': technical_data.get('timeframes', [])
+                    })
+                
+                structured_data[symbol] = schema
+        
+        return structured_data
+
     async def _distill_report(self, analysis_data: Dict) -> Dict:
-        """Use LLM to distill and filter the stock analysis report."""
+        """Use LLM to distill and filter the stock analysis report with enhanced data preservation."""
         try:
             # Get tracked stocks
             tracked_stocks = await self._get_tracked_stocks()
             if not tracked_stocks:
                 logger.warning("No tracked stocks found in Notion DB")
                 return {"sections": []}
-                
-            # Build distillation prompt
-            prompt = f"""Act as a Stock Analysis Consolidator. Transform fragmented stock commentary into institutional-grade technical summaries using this strict protocol:
+            
+            # Create structured analysis to preserve data
+            structured_data = self.create_structured_analysis(analysis_data)
+            
+            # Enhanced distillation prompt with better formatting instructions
+            prompt = f"""Act as an Expert Technical Analysis Content Moderator. Transform fragmented stock commentary into institutional-grade technical summaries following these precise instructions:
 
-                    **Core Objective**  
-                    Create unified technical profiles for tracked stocks by synthesizing all mentions across source materials.
+**Core Mission**
+Create comprehensive technical profiles for tracked stocks by synthesizing all relevant data points across the provided analysis materials.
 
-                    **Tracked Stocks**  
-                    {', '.join(tracked_stocks)}
+**Critical Processing Rules**
+1. STRICT FILTERING:
+   - Process ONLY tracked stocks that have actual data in the input report
+   - EXCLUDE tracked stocks that have no meaningful data or mentions
+   - EXCLUDE all non-tracked stocks entirely
+2. DATA PRESERVATION:
+   - Maintain ALL visual references (frame_paths)
+   - Preserve chronological sequence of events
+   - Keep ALL relevant technical indicators and patterns
 
-                    Input Report:
-                    {json.dumps(analysis_data, indent=2)}
+**Technical Analysis Protocol**
+For each valid stock mention:
+1. Data Extraction:
+   - Price Action: Historical movements, key reversals, trend structure
+   - Volume Analysis: Trading activity, liquidity patterns, accumulation/distribution
+   - Technical Indicators: Moving averages, RSI, MACD, etc.
+   - Chart Patterns: Support/resistance, trend lines, formations
+   
+2. Risk Assessment:
+   - Volatility Profile: Historical and expected volatility levels
+   - Risk Factors: Technical weaknesses, overhead resistance, dilution risks
+   - Liquidity Considerations: Trading volume, market depth
+   
+3. Opportunity Analysis:
+   - Technical Setup Quality: Pattern completeness and reliability
+   - Entry/Exit Levels: Key price points for trade management
+   - Catalyst Timeline: Upcoming events that could impact technicals
 
-                    **Input Processing Rules**  
-                    1. Filter mercilessly - EXCLUDE all non-tracked stocks  
-                    2. Preserve ALL visual references (frame_paths)  
-                    3. Maintain chronological event sequence
-                    4. Don not include {', '.join(tracked_stocks)} sections in case the tracked stock is not mentioned in the provided input report
+**Synthesis Requirements**
+Construct comprehensive technical profiles with:
+1. Price Architecture:
+   - Key support/resistance levels
+   - Trend structure and momentum
+   - Price pattern formations
+   
+2. Risk/Reward Matrix:
+   - Potential reward targets
+   - Clear risk levels
+   - Position sizing considerations
+   
+3. Action Framework:
+   - Technical triggers for entry
+   - Risk management levels
+   - Target price objectives
 
-                    **Consolidation Protocol**  
-                    For each stock:  
-                    - Merge ALL entries into single profile  
-                    - Extract technical parameters from narratives:  
-                    ✓ Price history markers (e.g., "$0.7→$10 post-announcement")  
-                    ✓ Volatility catalysts (policy changes, earnings, M&A rumors)  
-                    ✓ Liquidity signals (volume patterns, float analysis)  
-                    ✓ Structural levels (IPO price, historical support/resistance analogs)  
-                    ✓ Risk multipliers (dilution potential, short interest cues)  
+**Tracked Stocks**  
+{', '.join(tracked_stocks)}
 
-                    **Synthesis Requirements**  
-                    Construct 3-element technical profiles:  
-                    1. **Price Architecture** - Map historical extremes and reaction levels  
-                    2. **Event Horizon** - Identify upcoming volatility triggers  
-                    3. **Liquidity Matrix** - Assess trading viability and exit risks  
+Input Report:
+{json.dumps(analysis_data, indent=2)}
 
-                    **Output Format**  
-                    Deliver strict JSON with:  
-                    ```json
-                    {{
-                    "Date": "",
-                    "Channel name": "",
-                    "sections": [
-                        {{
-                        "topic": "Technical Profile: {{STOCK}}",
-                        "stocks": ["{{STOCK}}"],
-                        "frame_paths": ["path1", ...],  
-                        "source": "Composite Analysis",
-                        "summary": "[Price Context] + [Volatility Profile] + [Key Risk/Return Ratio]",
-                        "key_points": [
-                            "Pattern: {{HistoricalPriceBehavior}}", 
-                            "Trigger: {{Catalyst}}",
-                            "Risk: {{StructuralWeakness}}",
-                            "Level: {{CriticalPriceThreshold}}"
-                        ]
-                        }}
-                    ]
-                    }}
+**Output Format**
+Deliver a strict JSON response:
+{{
+    "Date": "<current_date>",
+    "Channel name": "<channel_name>",
+    "sections": [
+        {{
+            "topic": "Technical Profile: <STOCK>",
+            "stocks": ["<STOCK>"],
+            "frame_paths": ["relevant_chart_paths"],
+            "source": "Composite Analysis",
+            "summary": "[Technical Context] + [Setup Quality] + [Risk/Reward Profile]",
+            "key_points": [
+                "Pattern: <identified_technical_pattern>",
+                "Setup: <current_technical_setup>",
+                "Risk: <key_risk_levels>",
+                "Target: <price_objectives>",
+                "Trigger: <entry_signals>"
+            ]
+        }}
+    ]
+}}
+
+IMPORTANT: Only include sections for tracked stocks that have actual technical analysis data in the input. Do not create empty or placeholder sections.
             """
             
-            # Generate distilled report
+            # Generate distilled report with data preservation
             response = self.model.generate_content(prompt)
             
             try:
@@ -224,17 +282,38 @@ class TechnicalAnalysisAgent:
                 json_str = response_text[start:end]
                 logger.info(f"Extracted JSON: {json_str}")
                 
-                # Parse and return the response
+                # Parse the response
                 distilled_report = json.loads(json_str)
                 
-                # Save debug file
+                # Apply data preservation to ensure no critical data is lost
+                preserved_report = self.preserve_critical_data(analysis_data, distilled_report)
+                
+                # Validate data integrity
+                validation_results = DataValidator.validate_data_integrity(analysis_data, preserved_report)
+                if not validation_results['valid']:
+                    logger.warning(f"Data integrity issues detected: {validation_results}")
+                
+                # Save debug files
                 debug_dir = Path("debug")
                 debug_dir.mkdir(exist_ok=True)
-                debug_file = debug_dir / f"consolidated_summary_{int(time.time())}.json"
-                with open(debug_file, "w") as f:
-                    json.dump(distilled_report, f, indent=2)
                 
-                return distilled_report
+                # Save consolidated report
+                debug_file = debug_dir / f"ta_consolidated_{int(time.time())}.json"
+                with open(debug_file, "w") as f:
+                    json.dump(preserved_report, f, indent=2)
+                
+                # Save structured data for reference
+                structured_debug_file = debug_dir / f"ta_structured_{int(time.time())}.json"
+                with open(structured_debug_file, "w") as f:
+                    json.dump(structured_data, f, indent=2)
+                
+                # Save validation results
+                validation_file = debug_dir / f"ta_validation_{int(time.time())}.json"
+                with open(validation_file, "w") as f:
+                    json.dump(validation_results, f, indent=2)
+                
+                logger.info(f"Saved enhanced analysis to {debug_file}")
+                return preserved_report
                 
             except json.JSONDecodeError as e:
                 logger.error(f"Error parsing distilled report: {str(e)}")

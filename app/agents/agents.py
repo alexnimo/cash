@@ -36,6 +36,8 @@ from app.tools import notion_tool_v2
 from app.tools.notion_tool_v2 import NotionTool
 from app.core.unified_config import get_config
 from app.llm import LLMFactory
+from app.core.data_preservation import DataPreservationMixin, DataValidator
+from app.core.notion_formatting import NotionRichTextFormatter, NotionBlockBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -1035,7 +1037,7 @@ class RAGAgent:
             raise
 
 
-class NotionAgent(BaseFinanceAgent):
+class NotionAgent(BaseFinanceAgent, DataPreservationMixin):
     """Agent for updating Notion database with technical analysis data"""
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
         """Initialize Notion agent"""
@@ -1058,6 +1060,10 @@ class NotionAgent(BaseFinanceAgent):
         # Only create debug directory if agent_debug is enabled
         if self.agent_debug_enabled:
             self.debug_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Initialize rich text formatter
+        self.rich_text_formatter = NotionRichTextFormatter()
+        logger.info("Initialized NotionRichTextFormatter for enhanced data presentation")
         
         # Set explicit ReAct mode configuration 
         self.config['response_mode'] = 'REACT'
@@ -1283,8 +1289,17 @@ class NotionAgent(BaseFinanceAgent):
             try:
                 # Format the input data to create a clear instruction for the Notion update
                 if isinstance(input_text, dict):
-                    # Skip debug file creation - we're using the RAG agent's debug file as the single source of truth
-                    logger.info("Processing data for Notion update (using RAG agent's output as source)")
+                    # First, apply rich text formatting to the data
+                    logger.info("Applying rich text formatting to data before Notion update")
+                    formatted_data = self._format_data_for_notion(input_text)
+                    
+                    # Validate the formatting was applied
+                    validation_results = self.validate_processing_pipeline(input_text, formatted_data)
+                    if self.agent_debug_enabled and validation_results:
+                        validation_debug_file = self.debug_dir / f"notion_validation_{int(time.time())}.json"
+                        with open(validation_debug_file, "w") as f:
+                            json.dump(validation_results, f, indent=2)
+                        logger.info(f"Notion processing validation saved to {validation_debug_file}")
                     
                     if not self.notion_tool:
                         error_msg = "Notion tool not available for direct execution"
@@ -1295,10 +1310,10 @@ class NotionAgent(BaseFinanceAgent):
                     failed_updates = 0
                     all_results = []
                     
-                    # Process all sections directly
-                    if 'sections' in input_text:
-                        sections = input_text.get('sections', [])
-                        logger.info(f"Directly processing {len(sections)} sections")
+                    # Process all sections with formatted data
+                    if 'sections' in formatted_data:
+                        sections = formatted_data.get('sections', [])
+                        logger.info(f"Processing {len(sections)} formatted sections")
                         
                         for section in sections:
                             if 'stocks' not in section:
@@ -1306,6 +1321,8 @@ class NotionAgent(BaseFinanceAgent):
                                 continue
                                 
                             stocks = section.get('stocks', [])
+                            # Use rich formatted content if available, fallback to original
+                            notion_blocks = section.get('notion_blocks', [])
                             summary = section.get('summary', '')
                             key_points = section.get('key_points', [])
                             frames = section.get('frame_paths', [])
@@ -1332,24 +1349,27 @@ class NotionAgent(BaseFinanceAgent):
                                             if match:
                                                 page_id = match.group(1)
                                     
-                                    # Step 2: Update or create page
+                                    # Step 2: Update or create page with rich content
+                                    content_data = {
+                                        "summary": summary,
+                                        "key_points": key_points,
+                                        "notion_blocks": notion_blocks
+                                    }
+                                    
                                     if page_id:
-                                        logger.info(f"Updating existing page for {stock}")
+                                        logger.info(f"Updating existing page for {stock} with rich content")
                                         update_result = await self.notion_tool.arun({
                                             "operation": "update_technical_analysis",
                                             "page_id": page_id,
-                                            "content": summary,
-                                            "channel_name": input_text.get('Channel name', input_text.get('channel_name', 'Unknown Channel'))
+                                            "content": content_data,
+                                            "channel_name": formatted_data.get('Channel name', formatted_data.get('channel_name', 'Unknown Channel'))
                                         })
                                     else:
-                                        logger.info(f"Creating new page for {stock}")
+                                        logger.info(f"Creating new page for {stock} with rich content")
                                         create_result = await self.notion_tool.arun({
                                             "operation": "create_or_update_stock_page",
                                             "ticker": stock,
-                                            "content": {
-                                                "summary": summary,
-                                                "key_points": key_points
-                                            }
+                                            "content": content_data
                                         })
                                         
                                         # Try to extract page_id from creation result
@@ -1421,6 +1441,46 @@ class NotionAgent(BaseFinanceAgent):
         error_message = str(last_error) if last_error else "Unknown error in NotionAgent execution"
         return {"error": error_message, "status": "failed"}
 
+    def _format_data_for_notion(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert structured data to rich text format for Notion.
+        
+        Args:
+            data: Dictionary containing technical analysis data
+            
+        Returns:
+            Dictionary with rich text formatted content
+        """
+        try:
+            # Create a copy to avoid modifying original data
+            formatted_data = data.copy()
+            
+            # Format each section with rich text blocks
+            if 'sections' in formatted_data:
+                for i, section in enumerate(formatted_data['sections']):
+                    # Convert section content to rich Notion blocks
+                    rich_blocks = self.rich_text_formatter.format_stock_analysis(section)
+                    
+                    # Store both original and formatted content
+                    section['notion_blocks'] = rich_blocks
+                    
+                    # Preserve critical data using the mixin method
+                    original_section = data.get('sections', [{}])[i] if i < len(data.get('sections', [])) else section
+                    formatted_data['sections'][i] = self.preserve_critical_data(original_section, section)
+                    
+            # Save formatted data for debugging if enabled
+            if self.agent_debug_enabled:
+                formatted_debug_file = self.debug_dir / f"notion_formatted_{int(time.time())}.json"
+                with open(formatted_debug_file, "w") as f:
+                    json.dump(formatted_data, f, indent=2)
+                logger.info(f"Saved formatted data to {formatted_debug_file}")
+                
+            return formatted_data
+            
+        except Exception as e:
+            logger.error(f"Error formatting data for Notion: {str(e)}")
+            # Return original data if formatting fails
+            return data
+
     async def process_technical_analysis(self, data: Dict[str, Any]) -> Dict:
         """Process technical analysis data and update Notion database.
         
@@ -1457,21 +1517,41 @@ class NotionAgent(BaseFinanceAgent):
                     "status": "error",
                     "message": "No Notion tool available"
                 }
+            
+            # Format data with rich text before processing
+            logger.info("Converting structured data to rich text format for Notion")
+            formatted_data = self._format_data_for_notion(data)
+            
+            # Validate data integrity after formatting
+            validation_results = DataValidator.validate_data_integrity(data, formatted_data)
+            if self.agent_debug_enabled and validation_results:
+                validation_debug_file = self.debug_dir / f"notion_validation_{int(time.time())}.json"
+                with open(validation_debug_file, "w") as f:
+                    json.dump(validation_results, f, indent=2)
+                logger.info(f"Saved validation results to {validation_debug_file}")
                 
             # Extract all unique stock tickers from the sections
             all_stocks = set()
-            for section in data.get('sections', []):
+            for section in formatted_data.get('sections', []):
                 stocks = section.get('stocks', [])
                 all_stocks.update(stocks)
                 
             logger.info(f"Processing technical analysis for {len(all_stocks)} stocks: {', '.join(all_stocks)}")
             
-            # Create a formatted prompt for the agent with explicit tool usage examples
+            # Create enhanced instructions that include rich text formatting
             instructions = r"""
 # Notion Database Update Task
 
 You are tasked with updating a Notion database with technical analysis data for stocks. 
 This task REQUIRES using the notion_tool with EXACT ReAct syntax.
+
+## ENHANCED DATA FORMAT:
+
+The input data now includes rich text formatting with 'notion_blocks' for enhanced presentation:
+- Each section contains 'notion_blocks' with rich Notion block structures
+- 'formatted_summary' contains enhanced summary text with key term highlighting
+- 'formatted_key_points' contains bulleted key points with emphasis
+- Original data is preserved alongside formatted versions
 
 ## STRICT REACT FORMAT REQUIREMENTS:
 
@@ -1490,15 +1570,15 @@ Action Input: {"input": {"operation": "<operation_name>", <operation_specific_pa
    Action: notion_tool
    Action Input: {"input": {"operation": "get_stock_page", "ticker": "AAPL"}}
 
-2. IF PAGE EXISTS:
-   Thought: The page exists, I'll update its technical analysis
+2. IF PAGE EXISTS - USE RICH TEXT CONTENT:
+   Thought: The page exists, I'll update it with rich text formatted content
    Action: notion_tool
-   Action Input: {"input": {"operation": "update_technical_analysis", "page_id": "page_id_here", "content": "Technical analysis content", "channel_name": "Channel"}} 
+   Action Input: {"input": {"operation": "update_technical_analysis", "page_id": "page_id_here", "content": {"notion_blocks": [...], "formatted_summary": "...", "formatted_key_points": [...]}, "channel_name": "Channel"}} 
 
-3. IF PAGE DOES NOT EXIST:
-   Thought: The page doesn't exist, I'll create a new one
+3. IF PAGE DOES NOT EXIST - CREATE WITH RICH TEXT:
+   Thought: The page doesn't exist, I'll create a new one with rich formatting
    Action: notion_tool
-   Action Input: {"input": {"operation": "create_or_update_stock_page", "ticker": "AAPL", "content": "Example summary"}} 
+   Action Input: {"input": {"operation": "create_or_update_stock_page", "ticker": "AAPL", "content": {"notion_blocks": [...], "formatted_summary": "...", "formatted_key_points": [...]}}} 
 
 4. FOR EACH FRAME:
    Thought: I need to add the chart to the page
@@ -1510,24 +1590,25 @@ Action Input: {"input": {"operation": "<operation_name>", <operation_specific_pa
 1. YOU MUST USE the notion_tool - no other tools will work
 2. YOU MUST INCLUDE the "input" wrapper parameter containing all operation details
 3. YOU MUST PROCESS EACH STOCK INDIVIDUALLY following the sequence above
-4. DO NOT SKIP any steps in the process
-5. NEVER format your action inputs in code blocks - use EXACT ReAct syntax shown above
-6. ALWAYS wait for the response from each tool call before proceeding
-7. ENSURE you process EVERY stock mentioned in the input data
-8. OPERATIONS MUST match exactly: "get_stock_page", "update_technical_analysis", "create_or_update_stock_page", "add_chart_to_page"
+4. USE the rich text formatted content (notion_blocks, formatted_summary, formatted_key_points) when available
+5. DO NOT SKIP any steps in the process
+6. NEVER format your action inputs in code blocks - use EXACT ReAct syntax shown above
+7. ALWAYS wait for the response from each tool call before proceeding
+8. ENSURE you process EVERY stock mentioned in the input data
+9. OPERATIONS MUST match exactly: "get_stock_page", "update_technical_analysis", "create_or_update_stock_page", "add_chart_to_page"
 
 ## DATA TO PROCESS:
 
-Process the following technical analysis data:
+Process the following rich text formatted technical analysis data:
 {{ ... }}
 """
             
-            # Ensure data is properly formatted as JSON 
-            json_data = json.dumps(data, indent=2)
+            # Ensure formatted data is properly formatted as JSON 
+            json_data = json.dumps(formatted_data, indent=2)
             prompt = instructions + "\n\n" + json_data
             
             # Execute the agent
-            logger.info("Running NotionAgent with detailed ReAct instructions")
+            logger.info("Running NotionAgent with rich text formatted data and detailed ReAct instructions")
             result = await self.execute(prompt)
             
             return result
@@ -1540,6 +1621,58 @@ Process the following technical analysis data:
                 "message": str(e),
                 "traceback": traceback.format_exc()
             }
+
+    def validate_processing_pipeline(self, original_data: Dict[str, Any], processed_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate data consistency between processing stages.
+        
+        Args:
+            original_data: Original input data
+            processed_data: Data after processing and formatting
+            
+        Returns:
+            Dictionary with validation results
+        """
+        try:
+            # Ensure we're validating the right data structure
+            if isinstance(processed_data, dict) and 'error' in processed_data:
+                logger.warning("Processed data contains error, skipping validation")
+                return {"error": "Processed data contains error", "status": "validation_skipped"}
+            
+            validation_results = DataValidator.validate_data_integrity(original_data, processed_data)
+            
+            # Add specific checks for Notion formatting
+            formatting_checks = {
+                "has_notion_blocks": False,
+                "has_formatted_summary": False,
+                "has_formatted_key_points": False,
+                "preserved_critical_fields": []
+            }
+            
+            if 'sections' in processed_data:
+                for section in processed_data['sections']:
+                    if 'notion_blocks' in section:
+                        formatting_checks["has_notion_blocks"] = True
+                    if 'formatted_summary' in section:
+                        formatting_checks["has_formatted_summary"] = True
+                    if 'formatted_key_points' in section:
+                        formatting_checks["has_formatted_key_points"] = True
+                        
+                    # Check for preserved critical fields
+                    for field in self.CRITICAL_FIELDS:
+                        if field in section:
+                            formatting_checks["preserved_critical_fields"].append(field)
+            
+            validation_results["formatting_validation"] = formatting_checks
+            
+            # Log validation summary
+            logger.info(f"Notion processing validation: {len(validation_results.get('missing_fields', []))} missing fields, "
+                       f"{len(validation_results.get('data_inconsistencies', []))} inconsistencies")
+            
+            return validation_results
+            
+        except Exception as e:
+            logger.error(f"Error in validation pipeline: {str(e)}")
+            return {"error": str(e), "status": "validation_failed"}
 
 class AgentWorkflow:
     """Agent workflow class for coordinating multiple agents"""
@@ -1839,6 +1972,15 @@ class AgentWorkflow:
                 # Execute technical analysis with only the final analysis data
                 technical_result = await self.agents['technical'].execute(final_analysis)
                 
+                # Validate technical analysis output
+                if hasattr(self.agents['technical'], 'validate_processing_pipeline'):
+                    tech_validation = self.agents['technical'].validate_processing_pipeline(final_analysis, technical_result)
+                    if self.agent_debug_enabled and tech_validation:
+                        tech_validation_file = self.debug_dir / f"tech_validation_{int(time.time())}.json"
+                        with open(tech_validation_file, "w") as f:
+                            json.dump(tech_validation, f, indent=2)
+                        logger.info(f"Technical analysis validation saved to {tech_validation_file}")
+                
                 analysis_data.update(technical_result)
                 results["technical_analysis"] = {"status": "completed"}
             except Exception as tech_error:
@@ -1889,6 +2031,15 @@ class AgentWorkflow:
                         except Exception as e:
                             logger.error(f"Failed to load RAG agent's output file: {e}")
                     
+                    # Validate RAG processing output
+                    if 'notion_data' in analysis_data and hasattr(self.agents['rag'], 'validate_processing_pipeline'):
+                        rag_validation = self.agents['rag'].validate_processing_pipeline(analysis_data, analysis_data['notion_data'])
+                        if self.agent_debug_enabled and rag_validation:
+                            rag_validation_file = self.debug_dir / f"rag_validation_{int(time.time())}.json"
+                            with open(rag_validation_file, "w") as f:
+                                json.dump(rag_validation, f, indent=2)
+                            logger.info(f"RAG processing validation saved to {rag_validation_file}")
+                    
                     # Log the channel name for debugging if available
                     if 'notion_data' in analysis_data:
                         notion_data = analysis_data['notion_data']
@@ -1927,6 +2078,15 @@ class AgentWorkflow:
                     logger.info(f"Channel name being passed to Notion: {channel_name}")
                     
                     notion_result = await self.agents['notion'].execute(notion_data)
+                    
+                    # Validate Notion processing output
+                    if hasattr(self.agents['notion'], 'validate_processing_pipeline'):
+                        notion_validation = self.agents['notion'].validate_processing_pipeline(notion_data, notion_result)
+                        if self.agent_debug_enabled and notion_validation:
+                            notion_validation_file = self.debug_dir / f"notion_validation_{int(time.time())}.json"
+                            with open(notion_validation_file, "w") as f:
+                                json.dump(notion_validation, f, indent=2)
+                            logger.info(f"Notion processing validation saved to {notion_validation_file}")
                 else:
                     # Fall back to using the full analysis_data if no preprocessed data is available
                     logger.info("No preprocessed data found, using full analysis data for Notion update")
@@ -1942,6 +2102,16 @@ class AgentWorkflow:
                     logger.info(f"Channel name being passed to Notion: {channel_name}")
                     
                     notion_result = await self.agents['notion'].execute(analysis_data)
+                    
+                    # Validate Notion processing output
+                    if hasattr(self.agents['notion'], 'validate_processing_pipeline'):
+                        notion_validation = self.agents['notion'].validate_processing_pipeline(analysis_data, notion_result)
+                        if self.agent_debug_enabled and notion_validation:
+                            notion_validation_file = self.debug_dir / f"notion_validation_{int(time.time())}.json"
+                            with open(notion_validation_file, "w") as f:
+                                json.dump(notion_validation, f, indent=2)
+                            logger.info(f"Notion processing validation saved to {notion_validation_file}")
+                
                 results["notion_update"] = {"status": "completed"}
                 results.update(notion_result)
             except Exception as notion_error:

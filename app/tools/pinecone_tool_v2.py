@@ -23,6 +23,42 @@ logging.getLogger("sentence_transformers").setLevel(logging.DEBUG)
 logging.getLogger("huggingface_hub").setLevel(logging.DEBUG)
 logging.getLogger("transformers").setLevel(logging.DEBUG)
 
+class EmbeddingServiceWrapper(BaseEmbedding):
+    """Wrapper to make EmbeddingService compatible with LlamaIndex BaseEmbedding interface."""
+    
+    def __init__(self, embedding_service, **kwargs):
+        super().__init__(**kwargs)
+        # Use object.__setattr__ to bypass Pydantic's field validation
+        object.__setattr__(self, 'embedding_service', embedding_service)
+        
+    def _get_query_embedding(self, query: str) -> List[float]:
+        """Get embedding for a query string."""
+        embeddings = self.embedding_service.embed_texts([query])
+        return embeddings[0] if embeddings else []
+    
+    def _get_text_embedding(self, text: str) -> List[float]:
+        """Get embedding for a text string."""
+        embeddings = self.embedding_service.embed_texts([text])
+        return embeddings[0] if embeddings else []
+    
+    def _get_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Get embeddings for multiple texts."""
+        return self.embedding_service.embed_texts(texts)
+    
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        """Async version of get_query_embedding."""
+        embeddings = await self.embedding_service.embed_texts_async([query])
+        return embeddings[0] if embeddings else []
+    
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        """Async version of get_text_embedding."""
+        embeddings = await self.embedding_service.embed_texts_async([text])
+        return embeddings[0] if embeddings else []
+    
+    async def _aget_text_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Async version of get_text_embeddings."""
+        return await self.embedding_service.embed_texts_async(texts)
+
 class PineconeAdvancedToolSpec(BaseTool):
     """Advanced Pinecone tool for vector operations"""
     def __init__(self):
@@ -80,10 +116,10 @@ class PineconeAdvancedToolSpec(BaseTool):
             from app.services.embedding_service import EmbeddingService
             
             # Get the singleton instance
-            embedding_service = EmbeddingService.get_instance()
+            self.embedding_service = EmbeddingService.get_instance()
             
-            # Get the embedding model (will be initialized if not already done)
-            self.embed_model = embedding_service.get_embedding_model(model_name=model_name_to_load)
+            # Create a LlamaIndex-compatible embedding model wrapper
+            self.embed_model = EmbeddingServiceWrapper(self.embedding_service)
             
             logger.info(f"Successfully accessed embedding model: {model_name_to_load}")
         except Exception as e:
