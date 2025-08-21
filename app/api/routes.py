@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.agents.agents import AgentWorkflow, TechnicalAnalysisAgent
 from app.config.agent_config import AGENT_CONFIG
 from app.tools import notion_tool_v2
+from app.services.janitor_service import janitor_service
 import httpx
 from llama_index.core.memory import ChatMemoryBuffer
 import logging
@@ -23,6 +24,15 @@ settings = get_settings()
 class LangTraceConfig(BaseModel):
     enabled: bool
     api_key: Optional[str] = None
+
+class JanitorConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    schedule: Optional[str] = None
+    retention_hours: Optional[int] = None
+    dry_run: Optional[bool] = None
+    exclude_patterns: Optional[list] = None
+    log_deletions: Optional[bool] = None
+    preserve_recent_files: Optional[bool] = None
 
 def get_model_manager():
     """Get or create the model manager instance."""
@@ -189,6 +199,69 @@ async def process_technical_analysis_from_url(url: str):
         return {"status": "success", "result": result}
     except Exception as e:
         logger.error(f"Error in processing technical analysis from URL: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Janitor service routes
+@router.get("/api/janitor/status")
+async def get_janitor_status():
+    """Get current janitor service status"""
+    try:
+        status = janitor_service.get_status()
+        return {"status": "success", "data": status}
+    except Exception as e:
+        logger.error(f"Error getting janitor status: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/janitor/config")
+async def update_janitor_config(config: JanitorConfigUpdate):
+    """Update janitor runtime configuration"""
+    try:
+        # Convert to dict and filter out None values
+        config_dict = {k: v for k, v in config.dict().items() if v is not None}
+        status = janitor_service.update_runtime_config(config_dict)
+        return {"status": "success", "data": status}
+    except Exception as e:
+        logger.error(f"Error updating janitor config: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/janitor/cleanup/manual")
+async def trigger_manual_cleanup():
+    """Trigger manual cleanup"""
+    try:
+        result = await janitor_service.manual_cleanup()
+        return {"status": "success", "data": result}
+    except Exception as e:
+        logger.error(f"Error in manual cleanup: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/janitor/cleanup/preview")
+async def get_cleanup_preview():
+    """Get preview of what would be cleaned up"""
+    try:
+        preview = await janitor_service.get_cleanup_preview()
+        return {"status": "success", "data": preview}
+    except Exception as e:
+        logger.error(f"Error getting cleanup preview: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/janitor/start")
+async def start_janitor():
+    """Start the janitor service"""
+    try:
+        await janitor_service.start()
+        return {"status": "success", "message": "Janitor service started"}
+    except Exception as e:
+        logger.error(f"Error starting janitor: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/janitor/stop")
+async def stop_janitor():
+    """Stop the janitor service"""
+    try:
+        await janitor_service.stop()
+        return {"status": "success", "message": "Janitor service stopped"}
+    except Exception as e:
+        logger.error(f"Error stopping janitor: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 router.include_router(agent_router, prefix="/api/agents")

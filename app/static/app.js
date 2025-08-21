@@ -313,8 +313,14 @@ document.addEventListener('DOMContentLoaded', () => {
             logToConsole(`Queue position: ${data.queue_info.position}`, 'info');
             updateStatus(`Video queued for processing: ${url}`, data.video_id);
             
-            // Start monitoring the queue and video processing
+            // Start log streaming and queue monitoring
+            initializeLogStreaming();
             startQueueMonitoring();
+            
+            // Initialize Janitor UI
+            if (document.getElementById('startJanitor')) {
+                initializeJanitorUI();
+            }
             pollVideoStatus(data.video_id);
             
         } catch (error) {
@@ -707,6 +713,11 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => {
             startQueueMonitoring();
         }, 500);
+        
+        // Initialize Janitor UI if elements exist
+        if (document.getElementById('startJanitor')) {
+            initializeJanitorUI();
+        }
     }, 100);
 });
 
@@ -983,4 +994,327 @@ function displayQueueStatus(queueData) {
         const shortId = current_video.substring(0, 8);
         logToConsole(`Processing video: ${shortId}...`, 'info');
     }
+}
+
+// Janitor Service Management
+let janitorStatusInterval = null;
+
+// Initialize Janitor UI when DOM is loaded
+function initializeJanitorUI() {
+    // Load initial status
+    loadJanitorStatus();
+    
+    // Set up event listeners
+    document.getElementById('startJanitor').addEventListener('click', startJanitorService);
+    document.getElementById('stopJanitor').addEventListener('click', stopJanitorService);
+    document.getElementById('refreshJanitorStatus').addEventListener('click', loadJanitorStatus);
+    document.getElementById('updateJanitorConfig').addEventListener('click', updateJanitorConfiguration);
+    document.getElementById('previewCleanup').addEventListener('click', previewCleanup);
+    document.getElementById('manualCleanup').addEventListener('click', manualCleanup);
+    
+    // Set up schedule UI listeners
+    document.getElementById('scheduleFrequency').addEventListener('change', toggleCustomCron);
+    
+    // Initialize schedule UI
+    toggleCustomCron();
+    
+    // Start periodic status updates
+    janitorStatusInterval = setInterval(loadJanitorStatus, 30000); // Every 30 seconds
+}
+
+async function loadJanitorStatus() {
+    try {
+        const response = await fetch('/api/janitor/status');
+        if (response.ok) {
+            const data = await response.json();
+            displayJanitorStatus(data.data);
+        } else {
+            throw new Error(`Failed to load janitor status: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error loading janitor status:', error);
+        document.getElementById('janitorStatusInfo').innerHTML = 
+            '<span class="text-red-600">Error loading status</span>';
+    }
+}
+
+function displayJanitorStatus(status) {
+    const statusInfo = document.getElementById('janitorStatusInfo');
+    const isRunning = status.running;
+    const isEnabled = status.enabled;
+    
+    // Update status display
+    let statusHtml = `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div>
+                <span class="font-medium">Enabled:</span>
+                <span class="ml-1 px-2 py-1 rounded ${
+                    isEnabled ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                }">${isEnabled ? 'Yes' : 'No'}</span>
+            </div>
+            <div>
+                <span class="font-medium">Running:</span>
+                <span class="ml-1 px-2 py-1 rounded ${
+                    isRunning ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'
+                }">${isRunning ? 'Yes' : 'No'}</span>
+            </div>
+            <div>
+                <span class="font-medium">Schedule:</span>
+                <span class="ml-1 text-xs">${status.schedule}</span>
+            </div>
+            <div>
+                <span class="font-medium">Dry Run:</span>
+                <span class="ml-1 px-2 py-1 rounded ${
+                    status.dry_run ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-800'
+                }">${status.dry_run ? 'Yes' : 'No'}</span>
+            </div>
+        </div>
+    `;
+    
+    if (status.last_cleanup) {
+        const cleanup = status.last_cleanup;
+        const filesDeleted = cleanup.files_deleted || 0;
+        const bytesFreed = cleanup.bytes_freed || 0;
+        const mbFreed = (bytesFreed / (1024 * 1024)).toFixed(2);
+        const errors = cleanup.errors ? cleanup.errors.length : 0;
+        
+        statusHtml += `
+            <div class="mt-3 pt-3 border-t">
+                <div class="text-sm font-medium text-gray-700 mb-2">Last Cleanup:</div>
+                <div class="grid grid-cols-3 gap-4 text-sm">
+                    <div>Files Deleted: <span class="font-medium">${filesDeleted}</span></div>
+                    <div>Space Freed: <span class="font-medium">${mbFreed} MB</span></div>
+                    <div>Errors: <span class="font-medium ${errors > 0 ? 'text-red-600' : ''}">${errors}</span></div>
+                </div>
+            </div>
+        `;
+    }
+    
+    statusInfo.innerHTML = statusHtml;
+    
+    // Update form fields with current config
+    if (status.config) {
+        document.getElementById('retentionHours').value = status.config.retention_hours || '';
+        updateScheduleUI(status.schedule || '0 1 * * *');
+        document.getElementById('dryRun').checked = status.dry_run || false;
+        document.getElementById('logDeletions').checked = status.config.log_deletions || false;
+        document.getElementById('preserveRecent').checked = status.config.preserve_recent_files || false;
+    }
+}
+
+async function startJanitorService() {
+    try {
+        const response = await fetch('/api/janitor/start', { method: 'POST' });
+        if (response.ok) {
+            const result = await response.json();
+            logToConsole('Janitor service started', 'success');
+            loadJanitorStatus();
+        } else {
+            throw new Error(`Failed to start janitor: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error starting janitor:', error);
+        logToConsole(`Error starting janitor: ${error.message}`, 'error');
+    }
+}
+
+async function stopJanitorService() {
+    try {
+        const response = await fetch('/api/janitor/stop', { method: 'POST' });
+        if (response.ok) {
+            const result = await response.json();
+            logToConsole('Janitor service stopped', 'success');
+            loadJanitorStatus();
+        } else {
+            throw new Error(`Failed to stop janitor: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error stopping janitor:', error);
+        logToConsole(`Error stopping janitor: ${error.message}`, 'error');
+    }
+}
+
+async function updateJanitorConfiguration() {
+    try {
+        const config = {
+            retention_hours: parseInt(document.getElementById('retentionHours').value) || undefined,
+            schedule: generateCronFromUI(),
+            dry_run: document.getElementById('dryRun').checked,
+            log_deletions: document.getElementById('logDeletions').checked,
+            preserve_recent_files: document.getElementById('preserveRecent').checked,
+            cleanup_paths: ["videos", "temp", "data/summaries", "traces"]  // Use paths from config.yaml
+        };
+        
+        // Remove undefined values
+        Object.keys(config).forEach(key => config[key] === undefined && delete config[key]);
+        
+        const response = await fetch('/api/janitor/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            logToConsole('Janitor configuration updated', 'success');
+            loadJanitorStatus();
+        } else {
+            throw new Error(`Failed to update config: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error updating janitor config:', error);
+        logToConsole(`Error updating config: ${error.message}`, 'error');
+    }
+}
+
+async function previewCleanup() {
+    try {
+        logToConsole('Generating cleanup preview...', 'info');
+        const response = await fetch('/api/janitor/cleanup/preview');
+        if (response.ok) {
+            const result = await response.json();
+            displayCleanupResults(result.data, true);
+            logToConsole('Cleanup preview generated', 'success');
+        } else {
+            throw new Error(`Failed to generate preview: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error generating preview:', error);
+        logToConsole(`Error generating preview: ${error.message}`, 'error');
+    }
+}
+
+async function manualCleanup() {
+    if (!confirm('Are you sure you want to run manual cleanup? This will delete files according to current configuration.')) {
+        return;
+    }
+    
+    try {
+        logToConsole('Starting manual cleanup...', 'info');
+        const response = await fetch('/api/janitor/cleanup/manual', { method: 'POST' });
+        if (response.ok) {
+            const result = await response.json();
+            displayCleanupResults(result.data, false);
+            logToConsole('Manual cleanup completed', 'success');
+            loadJanitorStatus();
+        } else {
+            throw new Error(`Failed to run cleanup: ${response.status}`);
+        }
+    } catch (error) {
+        console.error('Error running cleanup:', error);
+        logToConsole(`Error running cleanup: ${error.message}`, 'error');
+    }
+}
+
+function displayCleanupResults(results, isPreview) {
+    const resultsDiv = document.getElementById('cleanupResults');
+    const contentDiv = document.getElementById('cleanupResultsContent');
+    
+    const filesDeleted = results.files_deleted || 0;
+    const bytesFreed = results.bytes_freed || 0;
+    const mbFreed = (bytesFreed / (1024 * 1024)).toFixed(2);
+    const errors = results.errors ? results.errors.length : 0;
+    const duration = results.duration_seconds ? results.duration_seconds.toFixed(2) : 'N/A';
+    
+    let html = `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-3">
+            <div>
+                <span class="font-medium">${isPreview ? 'Would Delete:' : 'Files Deleted:'}</span>
+                <span class="ml-1 px-2 py-1 bg-blue-100 text-blue-800 rounded">${filesDeleted}</span>
+            </div>
+            <div>
+                <span class="font-medium">${isPreview ? 'Would Free:' : 'Space Freed:'}</span>
+                <span class="ml-1 px-2 py-1 bg-green-100 text-green-800 rounded">${mbFreed} MB</span>
+            </div>
+            <div>
+                <span class="font-medium">Errors:</span>
+                <span class="ml-1 px-2 py-1 rounded ${errors > 0 ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-800'}">${errors}</span>
+            </div>
+            <div>
+                <span class="font-medium">Duration:</span>
+                <span class="ml-1 text-xs">${duration}s</span>
+            </div>
+        </div>
+    `;
+    
+    if (results.paths_processed && results.paths_processed.length > 0) {
+        html += '<div class="text-sm"><span class="font-medium">Paths Processed:</span><ul class="mt-1 ml-4">';
+        results.paths_processed.forEach(path => {
+            html += `<li>• ${path.path}: ${path.files_deleted} files, ${(path.bytes_freed / (1024 * 1024)).toFixed(2)} MB</li>`;
+        });
+        html += '</ul></div>';
+    }
+    
+    if (errors > 0 && results.errors) {
+        html += '<div class="mt-3 text-sm"><span class="font-medium text-red-600">Errors:</span><ul class="mt-1 ml-4 text-red-600">';
+        results.errors.slice(0, 5).forEach(error => {
+            html += `<li>• ${error}</li>`;
+        });
+        if (results.errors.length > 5) {
+            html += `<li>• ... and ${results.errors.length - 5} more errors</li>`;
+        }
+        html += '</ul></div>';
+    }
+    
+    contentDiv.innerHTML = html;
+    resultsDiv.classList.remove('hidden');
+}
+
+// Schedule UI Helper Functions
+function toggleCustomCron() {
+    const frequency = document.getElementById('scheduleFrequency').value;
+    const customCron = document.getElementById('customCron');
+    
+    if (frequency === 'custom') {
+        customCron.classList.remove('hidden');
+    } else {
+        customCron.classList.add('hidden');
+    }
+}
+
+function generateCronFromUI() {
+    const frequency = document.getElementById('scheduleFrequency').value;
+    const time = parseInt(document.getElementById('scheduleTime').value);
+    
+    if (frequency === 'custom') {
+        return document.getElementById('customCron').value || '0 1 * * *';
+    }
+    
+    switch (frequency) {
+        case 'daily':
+            return `0 ${time} * * *`;
+        case 'weekly':
+            return `0 ${time} * * 0`; // Sunday
+        case 'monthly':
+            return `0 ${time} 1 * *`; // First day of month
+        default:
+            return '0 1 * * *'; // Default to 1 AM daily
+    }
+}
+
+function updateScheduleUI(cronExpression) {
+    // Parse cron expression and update UI
+    const parts = cronExpression.split(' ');
+    if (parts.length >= 5) {
+        const hour = parseInt(parts[1]);
+        const dayOfMonth = parts[2];
+        const dayOfWeek = parts[4];
+        
+        // Set time
+        document.getElementById('scheduleTime').value = hour;
+        
+        // Determine frequency
+        if (dayOfMonth === '1' && dayOfWeek === '*') {
+            document.getElementById('scheduleFrequency').value = 'monthly';
+        } else if (dayOfMonth === '*' && dayOfWeek === '0') {
+            document.getElementById('scheduleFrequency').value = 'weekly';
+        } else if (dayOfMonth === '*' && dayOfWeek === '*') {
+            document.getElementById('scheduleFrequency').value = 'daily';
+        } else {
+            document.getElementById('scheduleFrequency').value = 'custom';
+            document.getElementById('customCron').value = cronExpression;
+        }
+    }
+    
+    toggleCustomCron();
 }

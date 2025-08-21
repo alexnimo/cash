@@ -31,8 +31,9 @@ A powerful tool for analyzing YouTube videos using AI, featuring intelligent cha
   - Easy-to-use upload forms
 
 - **System Management**
-  - Automated file cleanup service (janitor) with cron scheduling
-  - Configurable retention policies
+  - Automated file cleanup service (Janitor) with cron scheduling
+  - Configurable retention policies and smart file filtering
+  - Web UI controls for service management
   - Background maintenance tasks
   - Queue management and monitoring
 
@@ -174,8 +175,13 @@ janitor:
     - "*.mp4"
     - "*.wav"
     - "*.txt"
+    - "*.json"
   retention_hours: 168  # 7 days
   dry_run: false
+  max_file_size_mb: null  # Optional file size limit
+  exclude_patterns: []  # Files to exclude from cleanup
+  log_deletions: true  # Log each file deletion
+  preserve_recent_files: true  # Keep files from last 24h regardless of retention
 ```
 
 ### Storage Settings
@@ -215,9 +221,13 @@ http://localhost:8000/docs
 - `GET /api/queue/status`: Get video processing queue status
 - `GET /api/queue/video/{video_id}`: Get specific video queue info
 
-### System Management Endpoints
-- `GET /api/janitor/status`: Check file cleanup service status
-- `POST /api/janitor/cleanup`: Trigger manual cleanup
+### File Cleanup (Janitor) Endpoints
+- `GET /api/janitor/status`: Get service status and configuration
+- `POST /api/janitor/config`: Update runtime configuration
+- `POST /api/janitor/cleanup/manual`: Trigger manual cleanup
+- `GET /api/janitor/cleanup/preview`: Preview cleanup without deletion
+- `POST /api/janitor/start`: Start the janitor service
+- `POST /api/janitor/stop`: Stop the janitor service
 
 ## Enhanced Features
 
@@ -247,12 +257,22 @@ Queue features:
 
 ### Automated File Cleanup (Janitor)
 
-The janitor service automatically manages storage:
+The janitor service automatically manages storage with advanced features:
 - **Cron-based scheduling**: Configurable cleanup schedules using cron syntax
-- **Selective cleanup**: Target specific file types and directories
+- **Smart file filtering**: Exclusion patterns, size limits, and recent file preservation
 - **Retention policies**: Keep files for configurable time periods
-- **Dry run mode**: Test cleanup operations without deleting files
+- **Web UI management**: Full control panel with real-time status and configuration
+- **Preview mode**: Safe cleanup preview before actual deletion
+- **Runtime configuration**: Update settings without restarting the service
+- **Detailed logging**: Comprehensive deletion tracking and error reporting
 - **Manual triggers**: API endpoints for on-demand cleanup
+
+#### Janitor Web Interface Features
+- **Service Controls**: Start/stop service with one click
+- **Configuration Panel**: Adjust retention hours, file size limits, and cleanup schedule
+- **Cleanup Options**: Preview what would be deleted or run manual cleanup
+- **Status Display**: Real-time service status and last cleanup results
+- **Results Visualization**: Detailed statistics showing files deleted, space freed, and errors
 
 ### File Upload Support
 
