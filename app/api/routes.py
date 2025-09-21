@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.agents.agents import AgentWorkflow, TechnicalAnalysisAgent
 from app.config.agent_config import AGENT_CONFIG
 from app.tools import notion_tool_v2
+from app.services.janitor_service import janitor_service
 import httpx
 from llama_index.core.memory import ChatMemoryBuffer
 import logging
@@ -23,6 +24,15 @@ settings = get_settings()
 class LangTraceConfig(BaseModel):
     enabled: bool
     api_key: Optional[str] = None
+
+class JanitorConfigUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    schedule: Optional[str] = None
+    retention_hours: Optional[int] = None
+    dry_run: Optional[bool] = None
+    exclude_patterns: Optional[list] = None
+    log_deletions: Optional[bool] = None
+    preserve_recent_files: Optional[bool] = None
 
 def get_model_manager():
     """Get or create the model manager instance."""

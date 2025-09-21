@@ -55,11 +55,8 @@ setup(
     name="video-analyzer",
     version="0.1",
     packages=find_packages(),
-    install_requires=[
-        line.strip()
-        for line in open("requirements.txt")
-        if line.strip() and not line.startswith("#")
-    ],
+    # Dependencies are now managed by pyproject.toml and uv
+    # install_requires will be read from pyproject.toml automatically
     cmdclass={
         'install': CustomInstall,
     },

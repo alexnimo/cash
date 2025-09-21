@@ -828,6 +828,15 @@ class ModelManager:
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {provider}")
+    
+    def close(self):
+        """Clean up model manager resources"""
+        logger.debug("Closing ModelManager resources")
+        # Clear cached models
+        self.models.clear()
+        # Reset quota status
+        self._quota_status.clear()
+        logger.debug("ModelManager resources cleaned up")
 
 class QuotaExceededError(Exception):
     """Raised when API quota is exhausted"""

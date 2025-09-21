@@ -147,10 +147,13 @@ class JanitorConfig(BaseModel):
     """Configuration for the janitor (file cleanup) service"""
     enabled: bool = Field(default=True)
     schedule: str = Field(default="0 1 * * *")  # Daily at 1:00 AM
-    cleanup_paths: List[str] = Field(default=["downloads", "temp", "transcripts"])
-    file_patterns: List[str] = Field(default=["*.mp4", "*.wav", "*.txt"])
+    cleanup_paths: List[str] = Field(default=["videos", "temp", "data/summaries", "traces"])
+    file_patterns: List[str] = Field(default=["*.mp4", "*.wav", "*.txt", "*.json"])
     retention_hours: int = Field(default=168)  # 7 days
-    dry_run: bool = Field(default=False)  # Default to 30 minutes
+    dry_run: bool = Field(default=False)
+    exclude_patterns: List[str] = Field(default=[])  # Files to exclude from cleanup
+    log_deletions: bool = Field(default=True)  # Log each file deletion
+    preserve_recent_files: bool = Field(default=True)  # Keep files from last 24h regardless of retention
 
 class Settings(BaseModel):
     app_name: str = "Video Analyzer"

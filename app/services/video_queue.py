@@ -119,7 +119,7 @@ class VideoProcessingQueue:
                         # Update video status
                         if self.current_item.video.id in self.video_status:
                             self.video_status[self.current_item.video.id].update({
-                                "status": VideoStatus.ERROR,
+                                "status": VideoStatus.FAILED,
                                 "queue_status": QueueStatus.FAILED.value,
                                 "error": "Processing timeout exceeded",
                                 "completed_at": self.current_item.completed_at.isoformat()
@@ -158,7 +158,7 @@ class VideoProcessingQueue:
                     # Update video status
                     if self.current_item.video.id in self.video_status:
                         self.video_status[self.current_item.video.id].update({
-                            "status": VideoStatus.ERROR,
+                            "status": VideoStatus.FAILED,
                             "queue_status": QueueStatus.FAILED.value,
                             "error": str(e),
                             "completed_at": self.current_item.completed_at.isoformat()
@@ -201,7 +201,11 @@ class VideoProcessingQueue:
             video_processor = VideoProcessor(video_status=self.video_status)
             
             # Process the video
-            await video_processor.process_video(queue_item.video)
+            try:
+                await video_processor.process_video(queue_item.video)
+            finally:
+                # Ensure proper cleanup of video processor resources
+                await video_processor.cleanup()
             
             # Mark as completed
             queue_item.status = QueueStatus.COMPLETED
@@ -226,7 +230,7 @@ class VideoProcessingQueue:
             
             # Update video status
             self.video_status[queue_item.video.id].update({
-                "status": VideoStatus.ERROR,
+                "status": VideoStatus.FAILED,
                 "queue_status": QueueStatus.FAILED.value,
                 "error": str(e),
                 "completed_at": queue_item.completed_at.isoformat()

@@ -5,9 +5,27 @@ from pathlib import Path
 import logging
 import xml.etree.ElementTree
 import xml.parsers.expat
+import yt_dlp
+from datetime import datetime
+import tempfile
+import shutil
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+import re
+from pytubefix import YouTube
+from pytubefix.exceptions import PytubeFixError
+# Removed langtrace import
+from app.utils.path_utils import get_storage_subdir, get_storage_path
+import google.generativeai as genai
+from google.generativeai.types import GenerateContentResponse
+from app.models.video import Video, VideoSource, VideoStatus, VideoMetadata, VideoAnalysis
+from app.core.unified_config import get_config
+from app.services.model_manager import ModelManager
+from app.services.model_config import configure_models
+from app.services.content_analyzer import ContentAnalyzer
+from app.services.errors import VideoProcessingError
 import math
 import uuid
-import shutil
+import json
 from moviepy import VideoFileClip, AudioFileClip
 import yt_dlp
 import json
@@ -33,12 +51,21 @@ from app.services.content_analyzer import ContentAnalyzer
 from app.services.errors import VideoProcessingError
 import re
 
+# Use MoviePy for audio processing instead of pydub for Python 3.13 compatibility
+try:
+    from moviepy import AudioFileClip
+    AUDIO_PROCESSING_AVAILABLE = True
+except ImportError:
+    AUDIO_PROCESSING_AVAILABLE = False
+    AudioFileClip = None
+
+# Keep pydub import for fallback (if available)
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
 except ImportError:
     PYDUB_AVAILABLE = False
-    AudioSegment = None  # Define for type hinting
+    AudioSegment = None
 
 class TranscriptSegment:
     """Represents a segment of a transcript with timestamp information."""
@@ -730,8 +757,28 @@ class VideoProcessor:
             video_url = str(video.url)
             logger.info(f"Downloading video from URL: {video_url}")
             
-            # First extract metadata without downloading
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            # Enhanced configuration for metadata extraction to avoid bot detection
+            metadata_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'ignoreerrors': False,
+                'nocheckcertificate': True,
+                # Add headers to avoid bot detection
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'en-us,en;q=0.5',
+                    'Accept-Encoding': 'gzip,deflate',
+                    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.7',
+                    'Connection': 'keep-alive',
+                },
+                # Additional options to avoid restrictions
+                'extractor_retries': 3,
+                'fragment_retries': 3,
+                'retry_sleep_functions': {'http': lambda n: min(4 ** n, 60)},
+            }
+            
+            with yt_dlp.YoutubeDL(metadata_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 if info is None:
                     raise VideoProcessingError("Failed to get video metadata")
@@ -776,16 +823,41 @@ class VideoProcessor:
                 
                 logger.info(f"Processed metadata - Channel: {channel_name}, Title: {video.metadata.video_title}")
             
-            # Download video only
+            # Download video with comprehensive anti-bot measures
             video_opts = {
-                'format': 'bestvideo[height<=?1080]/mp4',  # Get best video up to 1080p
+                # Most flexible format selection - try anything available
+                'format': 'worst/best',  # Start with worst quality to avoid premium formats
                 'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
                 'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
                 'quiet': True,
                 'no_warnings': True,
                 'ignoreerrors': False,
                 'nocheckcertificate': True,
-                'source_address': '0.0.0.0',  # Force ipv4  # Use cookies file
+                # Enhanced headers to mimic real browser
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0',
+                },
+                # Aggressive retry and delay settings
+                'extractor_retries': 5,
+                'fragment_retries': 5,
+                'retry_sleep_functions': {'http': lambda n: min(2 ** n, 30)},
+                'sleep_interval': 1,
+                'max_sleep_interval': 5,
+                # Additional YouTube-specific options
+                'youtube_include_dash_manifest': False,
+                'writesubtitles': False,
+                'writeautomaticsub': False,
             }
             
             # Download video
@@ -805,8 +877,133 @@ class VideoProcessor:
                 return video_path
             
         except Exception as e:
-            logger.error(f"Failed to download video: {str(e)}", exc_info=True)
-            raise VideoProcessingError(f"Failed to download video: {str(e)}")
+            logger.error(f"Failed to download video with yt-dlp: {str(e)}")
+            fallback_triggers = [
+                "403",
+                "Requested format is not available", 
+                "Failed to extract any player response",
+                "Sign in to confirm your age",
+                "Private video",
+                "Video unavailable"
+            ]
+            
+            should_fallback = any(trigger in str(e) for trigger in fallback_triggers)
+            
+            if should_fallback:
+                logger.info(f"Attempting fallback to pytubefix due to yt-dlp failure: {str(e)}")
+                try:
+                    return await self._download_video_pytubefix_fallback(video)
+                except Exception as fallback_error:
+                    logger.error(f"Pytubefix fallback also failed: {str(fallback_error)}")
+                    raise VideoProcessingError(f"Both yt-dlp and pytubefix failed. yt-dlp: {str(e)}, pytubefix: {str(fallback_error)}")
+            else:
+                raise VideoProcessingError(f"Failed to download video: {str(e)}")
+
+    async def _download_video_pytubefix_fallback(self, video: Video) -> str:
+        """Fallback method using pytubefix when yt-dlp fails"""
+        try:
+            video_url = str(video.url)
+            logger.info(f"Using pytubefix fallback for URL: {video_url}")
+            
+            # Create YouTube object with OAuth for better reliability
+            yt = YouTube(
+                video_url,
+                use_oauth=False,  # Start without OAuth, can be enabled if needed
+                allow_oauth_cache=True
+            )
+            
+            # Extract metadata if not already done
+            if not video.metadata:
+                # Get channel name from various sources
+                channel_name = (
+                    getattr(yt, 'author', None) or 
+                    getattr(yt, 'channel_name', None) or
+                    ''
+                )
+                
+                video.metadata = VideoMetadata(
+                    title=yt.title or '',
+                    duration=float(yt.length or 0),
+                    resolution=(
+                        getattr(yt.streams.get_highest_resolution(), 'resolution', '720p').replace('p', ''),
+                        720  # Default height
+                    ),
+                    format='mp4',
+                    size_bytes=0,  # Will be updated after download
+                    channel_name=channel_name,
+                    video_title=yt.title or ''
+                )
+                
+                logger.info(f"Extracted metadata with pytubefix - Channel: {channel_name}, Title: {video.metadata.video_title}")
+            
+            # Get the best available stream (prefer mp4)
+            stream = None
+            
+            # Try different stream selection strategies
+            strategies = [
+                lambda: yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first(),
+                lambda: yt.streams.filter(adaptive=True, file_extension='mp4', only_video=True).order_by('resolution').desc().first(),
+                lambda: yt.streams.filter(file_extension='mp4').order_by('resolution').desc().first(),
+                lambda: yt.streams.get_highest_resolution(),
+                lambda: yt.streams.first()
+            ]
+            
+            for i, strategy in enumerate(strategies):
+                try:
+                    stream = strategy()
+                    if stream:
+                        logger.info(f"Selected stream using strategy {i+1}: {stream.resolution} {stream.mime_type}")
+                        break
+                except Exception as strategy_error:
+                    logger.debug(f"Strategy {i+1} failed: {strategy_error}")
+                    continue
+            
+            if not stream:
+                raise VideoProcessingError("No suitable video stream found with pytubefix")
+            
+            # Download the video
+            output_path = str(self.video_dir)
+            filename = f"{video.id}.{stream.subtype}"
+            
+            logger.info(f"Downloading with pytubefix: {stream.resolution} {stream.mime_type}")
+            
+            # Download with progress callback
+            def progress_callback(stream, chunk, bytes_remaining):
+                total_size = stream.filesize
+                bytes_downloaded = total_size - bytes_remaining
+                percentage = int((bytes_downloaded / total_size) * 100)
+                self._update_download_progress(video.id, {
+                    'status': 'downloading',
+                    '_percent_str': f'{percentage}%',
+                    'downloaded_bytes': bytes_downloaded,
+                    'total_bytes': total_size
+                })
+            
+            # Set progress callback
+            yt.register_on_progress_callback(progress_callback)
+            
+            # Download the file
+            downloaded_file = stream.download(
+                output_path=output_path,
+                filename=filename
+            )
+            
+            if not os.path.exists(downloaded_file):
+                raise VideoProcessingError(f"Downloaded file not found: {downloaded_file}")
+            
+            # Update metadata with actual file size
+            if video.metadata:
+                video.metadata.size_bytes = os.path.getsize(downloaded_file)
+            
+            logger.info(f"Successfully downloaded video with pytubefix to: {downloaded_file}")
+            return downloaded_file
+            
+        except PytubeFixError as e:
+            logger.error(f"PytubeFixError: {str(e)}")
+            raise VideoProcessingError(f"Pytubefix error: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to download video with pytubefix: {str(e)}", exc_info=True)
+            raise VideoProcessingError(f"Pytubefix fallback failed: {str(e)}")
 
     async def _validate_video_file(self, file_path: str) -> bool:
         """Validate video file using ffmpeg"""
