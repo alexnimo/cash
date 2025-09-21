@@ -1,6 +1,5 @@
 # Core dependencies
 yt-dlp>=2023.12.30
-pytubefix>=6.10.2
 moviepy>=1.0.3
 pydantic>=2.5.2
 fastapi>=0.104.1
@@ -45,6 +44,12 @@ sentence-transformers>=2.2.2
 llama-index-embeddings-huggingface
 einops
 
+# Agno framework for DannyTrades agent
+agno>=0.2.0
+anthropic>=0.25.0
+mcp>=1.0.0
+
 # Testing dependencies
 pytest>=7.4.0
 pytest-mock>=3.11.1
+pytest-asyncio>=0.21.0

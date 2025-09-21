@@ -4,9 +4,36 @@ from llama_index.core import Response
 from llama_index.core.tools import BaseTool
 from llama_index.core.tools.types import ToolMetadata
 from llama_index.core.embeddings import BaseEmbedding
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+
+# Optional import with graceful fallback for HuggingFace embeddings
+HUGGINGFACE_EMBEDDING_AVAILABLE = False
+HuggingFaceEmbedding = None
+
+try:
+    from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+    HUGGINGFACE_EMBEDDING_AVAILABLE = True
+except ImportError:
+    try:
+        # Try alternative import path
+        from llama_index.embeddings.huggingface.base import HuggingFaceEmbedding
+        HUGGINGFACE_EMBEDDING_AVAILABLE = True
+    except ImportError:
+        # Create a mock class to prevent errors
+        class HuggingFaceEmbedding:
+            def __init__(self, *args, **kwargs):
+                raise ImportError("llama-index-embeddings-huggingface not installed")
+        HUGGINGFACE_EMBEDDING_AVAILABLE = False
 from llama_index.core.ingestion import IngestionPipeline
-from pinecone import Pinecone, ServerlessSpec, Index
+# Optional import with graceful fallback
+try:
+    from pinecone import Pinecone, ServerlessSpec, Index
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+    Pinecone = None
+    ServerlessSpec = None
+    Index = None
+
 from typing import List, Dict, Any, Optional
 from app.core.settings import get_settings
 import numpy as np
@@ -63,6 +90,8 @@ class PineconeAdvancedToolSpec(BaseTool):
     """Advanced Pinecone tool for vector operations"""
     def __init__(self):
         super().__init__()
+        if not PINECONE_AVAILABLE:
+            raise ImportError("Pinecone is not available - package not installed")
         
         settings = get_settings()
         
@@ -144,7 +173,11 @@ class PineconeAdvancedToolSpec(BaseTool):
             if hasattr(self, 'embedding_model_settings') and self.embedding_model_settings:
                 model_name_to_load = self.embedding_model_settings.model
                 try:
-                    self.embed_model = HuggingFaceEmbedding(model_name=model_name_to_load, trust_remote_code=True)
+                    if HUGGINGFACE_EMBEDDING_AVAILABLE:
+                        self.embed_model = HuggingFaceEmbedding(model_name=model_name_to_load, trust_remote_code=True)
+                    else:
+                        logger.warning("HuggingFace embeddings not available, using default embedding model")
+                        self.embed_model = None
                     logger.info(f"Re-initialized embedding model: {model_name_to_load}")
                 except Exception as e:
                     logger.error(f"Failed to re-initialize embedding model {model_name_to_load}: {e}")

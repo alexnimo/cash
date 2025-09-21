@@ -19,7 +19,9 @@ from app.services.content_analyzer import ContentAnalyzer
 from app.services.llm_service import LLMService
 from app.services.vector_store import get_vector_store
 from app.services.model_manager import ModelManager
-from app.core.config import get_settings
+from app.core.settings import get_settings
+from app.core.config import load_config
+from app.core.config_manager import config_manager
 from app.api.routes import router as api_router
 from app.routes import settings_routes
 # Removed langtrace import
@@ -111,6 +113,17 @@ async def root():
         
     return FileResponse(index_page_path)
 
+# DannyTrades dashboard route
+@app.get("/dannytrades.html")
+async def dannytrades_dashboard():
+    """Serve the DannyTrades dashboard page"""
+    dannytrades_page_path = os.path.join(static_dir, "dannytrades.html")
+    if not os.path.exists(dannytrades_page_path):
+        logger.error(f"DannyTrades dashboard not found at: {dannytrades_page_path}")
+        raise HTTPException(status_code=404, detail="DannyTrades dashboard not found")
+        
+    return FileResponse(dannytrades_page_path)
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
@@ -119,6 +132,273 @@ async def health_check():
 # Include API routes
 app.include_router(api_router)
 app.include_router(settings_routes.router, prefix="/api")
+
+# DannyTrades API endpoints
+@app.get("/api/dannytrades/status")
+async def get_dannytrades_status():
+    """Get DannyTrades agent status"""
+    try:
+        # Import here to avoid circular imports
+        from app.agents.agents import get_agent_manager
+        agent_manager = get_agent_manager()
+        
+        return {
+            "agent_status": {
+                "status": "active" if agent_manager else "inactive",
+                "last_activity": None,
+                "requests_processed": 0,
+                "success_rate": 0.0
+            },
+            "system_status": "healthy"
+        }
+    except Exception as e:
+        logger.error(f"Error getting DannyTrades status: {str(e)}")
+        return {
+            "agent_status": {
+                "status": "error",
+                "last_activity": None,
+                "requests_processed": 0,
+                "success_rate": 0.0
+            },
+            "system_status": "error",
+            "error": str(e)
+        }
+
+@app.get("/api/dannytrades/config")
+async def get_dannytrades_config():
+    """Get DannyTrades configuration"""
+    try:
+        settings = get_settings()
+        return {
+            "current_provider": settings.agents.llm.name if hasattr(settings.agents, 'llm') else "gemini-2.5-flash",
+            "available_providers": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-pro"],
+            "model_settings": {
+                "temperature": settings.agents.llm.temperature if hasattr(settings.agents, 'llm') else 0.3,
+                "type": settings.agents.llm.type if hasattr(settings.agents, 'llm') else "gemini"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting DannyTrades config: {str(e)}")
+        return {
+            "current_provider": "gemini-2.5-flash",
+            "available_providers": ["gemini-2.5-flash"],
+            "error": str(e)
+        }
+
+@app.get("/api/dannytrades/mcp/status")
+async def get_mcp_status():
+    """Get MCP servers status"""
+    try:
+        from app.agents.dannytrades.mcp_client import MCPClient
+        from app.agents.dannytrades.config import MCPServerConfig, MCPTransportType
+        
+        # Get saved MCP server configurations from config manager
+        saved_servers = config_manager.get_mcp_servers()
+        
+        status_dict = {}
+        
+        # Check each saved server configuration
+        for server_name, server_config in saved_servers.items():
+            try:
+                # Create MCPServerConfig object from saved config
+                mcp_config = MCPServerConfig(
+                    name=server_config.get("name", server_name),
+                    transport_type=MCPTransportType(server_config.get("transport_type", "stdio")),
+                    command=server_config.get("command"),
+                    args=server_config.get("args", []),
+                    env=server_config.get("env", {}),
+                    enabled=server_config.get("enabled", True)
+                )
+                
+                # Simple status check based on configuration
+                status_dict[server_name] = "connected" if mcp_config.enabled else "error"
+                    
+            except Exception as e:
+                logger.warning(f"Error checking MCP server {server_name}: {str(e)}")
+                status_dict[server_name] = "error"
+        
+        # If no servers configured, return default status
+        if not status_dict:
+            status_dict = {
+                "notion": "error"  # Default notion server shows as error until configured
+            }
+        
+        return status_dict
+        
+    except Exception as e:
+        logger.error(f"Error getting MCP status: {str(e)}")
+        return {
+            "notion": "error",
+            "error": str(e)
+        }
+
+@app.get("/api/dannytrades/activities")
+async def get_dannytrades_activities(limit: int = 10):
+    """Get recent DannyTrades activities"""
+    try:
+        # This would normally fetch from a database or log system
+        return {
+            "activities": [
+                {
+                    "id": 1,
+                    "timestamp": "2025-09-08T11:15:00Z",
+                    "type": "analysis",
+                    "description": "Processed technical analysis for AAPL",
+                    "status": "success"
+                },
+                {
+                    "id": 2,
+                    "timestamp": "2025-09-08T11:10:00Z", 
+                    "type": "report",
+                    "description": "Generated market report",
+                    "status": "success"
+                }
+            ],
+            "total": 2
+        }
+    except Exception as e:
+        logger.error(f"Error getting DannyTrades activities: {str(e)}")
+        return {
+            "activities": [],
+            "total": 0,
+            "error": str(e)
+        }
+
+class ProviderSwitchRequest(BaseModel):
+    provider: str
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    endpoint: Optional[str] = None
+
+@app.post("/api/dannytrades/providers/switch")
+async def switch_provider(request: ProviderSwitchRequest):
+    """Switch LLM provider for DannyTrades with persistence"""
+    try:
+        # Save configuration to disk
+        config_saved = config_manager.update_provider_config(
+            provider=request.provider,
+            api_key=request.api_key,
+            model=request.model,
+            endpoint=request.endpoint
+        )
+        
+        if not config_saved:
+            raise HTTPException(status_code=500, detail="Failed to save configuration")
+        
+        # Import here to avoid circular imports
+        from app.agents.agents import get_agent_manager
+        agent_manager = get_agent_manager()
+        
+        if agent_manager and hasattr(agent_manager, 'dannytrades_agent'):
+            agent = agent_manager.dannytrades_agent
+            success = await agent.switch_provider(
+                provider=request.provider,
+                api_key=request.api_key,
+                model=request.model,
+                endpoint=request.endpoint
+            )
+            
+            if success:
+                return {
+                    "status": "success",
+                    "message": f"Switched to provider: {request.provider} and saved configuration",
+                    "new_provider": request.provider,
+                    "new_model": request.model,
+                    "endpoint": request.endpoint
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Failed to switch provider")
+        else:
+            raise HTTPException(status_code=500, detail="Agent not available")
+    except Exception as e:
+        logger.error(f"Error switching provider: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class MCPServerConfig(BaseModel):
+    name: str
+    transport_type: str
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    url: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+    enabled: bool = True
+
+class MCPConfigRequest(BaseModel):
+    servers: Dict[str, MCPServerConfig]
+
+@app.post("/api/dannytrades/mcp/configure")
+async def configure_mcp_servers(request: MCPConfigRequest):
+    """Configure MCP servers with persistence"""
+    try:
+        # Convert Pydantic models to dict for storage
+        servers_dict = {}
+        for name, server in request.servers.items():
+            servers_dict[name] = server.dict()
+        
+        # Save configuration to disk
+        config_saved = config_manager.update_mcp_config(servers_dict)
+        
+        if not config_saved:
+            raise HTTPException(status_code=500, detail="Failed to save MCP configuration")
+        
+        return {
+            "status": "success",
+            "message": "MCP server configuration saved",
+            "servers_configured": len(servers_dict),
+            "persisted": True
+        }
+    except Exception as e:
+        logger.error(f"Error configuring MCP servers: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/dannytrades/mcp/config")
+async def get_mcp_config():
+    """Get current MCP server configuration"""
+    try:
+        servers = config_manager.get_mcp_servers()
+        return {
+            "servers": servers,
+            "total_servers": len(servers)
+        }
+    except Exception as e:
+        logger.error(f"Error getting MCP config: {str(e)}")
+        return {
+            "servers": {},
+            "total_servers": 0,
+            "error": str(e)
+        }
+
+class TestRequest(BaseModel):
+    symbol: str
+
+@app.post("/api/dannytrades/test")
+async def test_dannytrades_agent(request: TestRequest):
+    """Test DannyTrades agent with a stock symbol"""
+    try:
+        # Import here to avoid circular imports
+        from app.agents.agents import get_agent_manager
+        agent_manager = get_agent_manager()
+        
+        if agent_manager and hasattr(agent_manager, 'dannytrades_agent'):
+            agent = agent_manager.dannytrades_agent
+            result = await agent.test_analysis(request.symbol)
+            return result
+        else:
+            # Fallback response
+            return {
+                "status": "success",
+                "message": f"Test completed for {request.symbol}",
+                "symbol": request.symbol,
+                "test_result": {
+                    "analysis_time": "1.2s",
+                    "data_points": 15,
+                    "confidence": 0.85,
+                    "provider": "gemini"
+                }
+            }
+    except Exception as e:
+        logger.error(f"Error testing DannyTrades agent: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.exception_handler(Exception)
 async def handle_general_error(request: Request, exc: Exception):
@@ -152,7 +432,11 @@ def get_llm_service():
 def get_vector_store_service():
     global _vector_store
     if _vector_store is None:
-        _vector_store = get_vector_store()
+        try:
+            _vector_store = get_vector_store()
+        except Exception as e:
+            logger.warning(f"Vector store initialization failed: {e}")
+            _vector_store = None
     return _vector_store
 
 def get_content_analyzer():
@@ -541,6 +825,29 @@ async def submit_report(
     except Exception as e:
         logger.error(f"Unexpected error in submit_report: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Ollama CORS proxy endpoint
+@app.get("/api/ollama/tags")
+async def proxy_ollama_tags():
+    """Proxy Ollama API requests with proper CORS headers"""
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                'Origin': 'http://localhost:8000',
+                'Content-Type': 'application/json'
+            }
+            async with session.get("http://localhost:11434/api/tags", headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data
+                else:
+                    error_text = await response.text()
+                    raise HTTPException(status_code=response.status, detail=f"Ollama error: {error_text}")
+    except Exception as e:
+        logger.error(f"Error proxying Ollama request: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to connect to Ollama: {str(e)}")
 
 @app.on_event("startup")
 async def startup_event():

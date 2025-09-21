@@ -18,11 +18,27 @@ from llama_index.core.agent.react.formatter import ReActChatFormatter
 from llama_index.core.memory import ChatMemoryBuffer
 from llama_index.core.llms import ChatMessage, MessageRole, LLM
 from llama_index.core.node_parser import SemanticSplitterNodeParser
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.vector_stores.pinecone import PineconeVectorStore
+# Optional import with graceful fallback
+try:
+    from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+    HUGGINGFACE_AVAILABLE = True
+except ImportError:
+    HUGGINGFACE_AVAILABLE = False
+    HuggingFaceEmbedding = None
+# Optional imports with graceful fallback
+try:
+    from llama_index.vector_stores.pinecone import PineconeVectorStore
+    import pinecone
+    from pinecone import Pinecone, ServerlessSpec
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+    PineconeVectorStore = None
+    pinecone = None
+    Pinecone = None
+    ServerlessSpec = None
+
 from llama_index.core.prompts import PromptTemplate
-import pinecone
-from pinecone import Pinecone, ServerlessSpec
 
 # Removed langchain dependency - using llama_index exclusively
 # llama_index.core.agent already includes all the agent functionality we need
@@ -85,29 +101,7 @@ def parse_date(date_str: str) -> datetime.datetime:
 class BaseFinanceAgent(ReActAgent):
     """Base class for finance-specific agents"""
     def __init__(self, tools: List[BaseTool], llm: Any, memory: ChatMemoryBuffer, config: Dict[str, Any]):
-        # Get the unified config to access storage settings
-        unified_config = get_config()
-        
-        # Get the base storage path from config
-        storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
-        
-        # Check if agent debug is enabled
-        agent_debug_enabled = unified_config.get('agents', 'agent_debug', default=False)
-        
-        # Set up debug directory from config, relative to storage base path
-        debug_dir = config.get('debug_dir', 'debug')
-        self.debug_dir = Path(storage_base_path) / debug_dir
-        
-        # Only create debug directory if agent_debug is enabled
-        self.agent_debug_enabled = agent_debug_enabled
-        if self.agent_debug_enabled:
-            self.debug_dir.mkdir(exist_ok=True, parents=True)
-        
-        # Store the configuration
-        self.config = config
-        
         # Get system prompt from config
-        # Fix: Use positional argument for default value in dict.get
         system_prompt = config.get('system_prompt', '')
         
         # Create chat formatter with system prompt
@@ -115,7 +109,7 @@ class BaseFinanceAgent(ReActAgent):
             system_header=system_prompt
         )
 
-        # Initialize the base ReActAgent
+        # Initialize the base ReActAgent first
         super().__init__(
             tools=tools,
             llm=llm,
@@ -124,16 +118,38 @@ class BaseFinanceAgent(ReActAgent):
             react_chat_formatter=chat_formatter,
             verbose=True
         )
+        
+        # Now set custom attributes after parent initialization using object.__setattr__ to bypass Pydantic
+        # Get the unified config to access storage settings
+        unified_config = get_config()
+        
+        # Get the base storage path from config
+        storage_base_path = unified_config.get('storage', 'base_path', default='C:\\cash-temp-data')
+        
+        # Check if agent debug is enabled
+        agent_debug_enabled = unified_config.get('agents', 'agent_debug', default=False)
+        
+        # Set up debug directory from config, relative to storage base path
+        debug_dir = config.get('debug_dir', 'debug')
+        object.__setattr__(self, 'debug_dir', Path(storage_base_path) / debug_dir)
+        
+        # Only create debug directory if agent_debug is enabled
+        object.__setattr__(self, 'agent_debug_enabled', agent_debug_enabled)
+        if agent_debug_enabled:
+            self.debug_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Store the configuration
+        object.__setattr__(self, 'config', config)
 
 class TechnicalAnalysisAgent(BaseFinanceAgent):
     """Agent for technical analysis tasks"""
 
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
-        # Store LLM before initializing base agent
-        self.llm_service = llm
-        
-        # Initialize base agent
+        # Initialize base agent first
         super().__init__(tools=tools, llm=llm, memory=memory, config=config)
+        
+        # Store LLM after base initialization using object.__setattr__ to bypass Pydantic
+        object.__setattr__(self, 'llm_service', llm)
         
         # Initialize RAG agent with configuration from config.yaml
         import yaml
@@ -167,18 +183,19 @@ class TechnicalAnalysisAgent(BaseFinanceAgent):
         if 'debug_dir' not in rag_config:
             rag_config['debug_dir'] = 'debug'
             
-        # Initialize the RAG agent
-        self.rag_agent = RAGAgent(
+        # Initialize the RAG agent using object.__setattr__ to bypass Pydantic
+        object.__setattr__(self, 'rag_agent', RAGAgent(
             config=rag_config,
             llm_service=llm
-        )
+        ))
         
-        # Initialize Notion tool for tracked stocks
+        # Initialize Notion tool for tracked stocks using object.__setattr__ to bypass Pydantic
         try:
-            self.notion_tool = next(t for t in tools if isinstance(t, NotionTool))
+            notion_tool = next(t for t in tools if isinstance(t, NotionTool))
+            object.__setattr__(self, 'notion_tool', notion_tool)
         except StopIteration:
             logger.warning("No NotionTool found in provided tools")
-            self.notion_tool = None
+            object.__setattr__(self, 'notion_tool', None)
 
     async def execute(self, analysis_data: Union[Dict, str, Path]) -> Dict:
         """Execute technical analysis workflow"""
@@ -290,8 +307,8 @@ class MarketAnalysisAgent(BaseFinanceAgent):
         # Initialize base agent first, which sets up debug dir with proper path
         super().__init__(tools=tools, llm=llm, memory=memory, config=config)
         
-        # Store the configuration reference
-        self.config = config
+        # Store the configuration reference using object.__setattr__ to bypass Pydantic
+        object.__setattr__(self, 'config', config)
         
         # Initialize RAG agent with proper config
         # Pass the agent_debug_enabled flag to the RAG agent
@@ -299,13 +316,14 @@ class MarketAnalysisAgent(BaseFinanceAgent):
         if 'agent_debug' not in rag_config:
             rag_config['agent_debug'] = self.agent_debug_enabled
         
-        self.rag_agent = RAGAgent(
+        object.__setattr__(self, 'rag_agent', RAGAgent(
             config=rag_config,
             llm_service=llm
-        )
+        ))
         
-        # Initialize Notion tool for tracked stocks
-        self.notion_tool = next((t for t in tools if isinstance(t, NotionTool)), None)
+        # Initialize Notion tool for tracked stocks using object.__setattr__ to bypass Pydantic
+        notion_tool = next((t for t in tools if isinstance(t, NotionTool)), None)
+        object.__setattr__(self, 'notion_tool', notion_tool)
         if not self.notion_tool:
             logger.warning("NotionTool not found in provided tools")
         
@@ -477,7 +495,7 @@ class RAGAgent:
         unified_config = get_config()
         
         # Get the base storage path from config
-        storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
+        storage_base_path = unified_config.get('storage', 'base_path', default='C:\\cash-temp-data')
         
         # Check if agent debug is enabled from either the passed config or global config
         self.agent_debug_enabled = config.get('agent_debug', unified_config.get('agents', 'agent_debug', default=False))
@@ -535,10 +553,27 @@ class RAGAgent:
         self.system_prompt = self.config.get('system_prompt', '')
 
     def _init_vector_store(self):
-        from app.tools.pinecone_tool_v2 import PineconeAdvancedToolSpec
-        from llama_index.vector_stores.pinecone import PineconeVectorStore
-        self.pinecone_tool = PineconeAdvancedToolSpec()
-        self.vector_store = PineconeVectorStore(pinecone_index=self.pinecone_tool.index, embedding_model=self.pinecone_tool.embed_model)
+        try:
+            from app.tools.pinecone_tool_v2 import PineconeAdvancedToolSpec, HUGGINGFACE_EMBEDDING_AVAILABLE
+            
+            if not HUGGINGFACE_EMBEDDING_AVAILABLE:
+                logger.warning("HuggingFace embeddings not available, skipping vector store initialization")
+                self.pinecone_tool = None
+                self.vector_store = None
+                return
+                
+            from llama_index.vector_stores.pinecone import PineconeVectorStore
+            self.pinecone_tool = PineconeAdvancedToolSpec()
+            self.vector_store = PineconeVectorStore(pinecone_index=self.pinecone_tool.index, embedding_model=self.pinecone_tool.embed_model)
+            logger.info("Vector store initialized successfully")
+        except ImportError as e:
+            logger.warning(f"Pinecone vector store not available: {e}")
+            self.pinecone_tool = None
+            self.vector_store = None
+        except Exception as e:
+            logger.warning(f"Failed to initialize vector store: {e}")
+            self.pinecone_tool = None
+            self.vector_store = None
 
     def _prepare_section_text(self, section: Dict[str, Any]) -> str:
         """Prepare text for vectorization from a section."""
@@ -1041,25 +1076,6 @@ class NotionAgent(BaseFinanceAgent, DataPreservationMixin):
     """Agent for updating Notion database with technical analysis data"""
     def __init__(self, tools: List[BaseTool], llm: LLM, memory: ChatMemoryBuffer, config: Dict[str, Any]):
         """Initialize Notion agent"""
-        # Store the original config
-        self.config = config.copy()
-        
-        # Get the unified config to access storage settings
-        unified_config = get_config()
-        
-        # Get the base storage path from config
-        storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
-        
-        # Check if agent debug is enabled from either the passed config or global config
-        self.agent_debug_enabled = config.get('agent_debug', unified_config.get('agents', 'agent_debug', default=False))
-        
-        # Set up debug directory from config, relative to storage base path
-        debug_dir = self.config.get('debug_dir', 'debug')
-        self.debug_dir = Path(storage_base_path) / debug_dir
-        
-        # Only create debug directory if agent_debug is enabled
-        if self.agent_debug_enabled:
-            self.debug_dir.mkdir(exist_ok=True, parents=True)
         
         # Initialize rich text formatter
         self.rich_text_formatter = NotionRichTextFormatter()
@@ -1070,12 +1086,12 @@ class NotionAgent(BaseFinanceAgent, DataPreservationMixin):
         self.config['force_tool_use'] = True
         self.config['verbose'] = True
         
-        # Find and log available tools
-        self.notion_tool = None
+        # Find and log available tools using object.__setattr__ to bypass Pydantic
+        object.__setattr__(self, 'notion_tool', None)
         for tool in tools:
             try:
                 if 'notion' in tool.metadata.name.lower():
-                    self.notion_tool = tool
+                    object.__setattr__(self, 'notion_tool', tool)
                     logger.info(f"Found Notion tool: {tool.metadata.name}")
                     # Log available methods for debugging
                     for method in dir(tool):
@@ -1181,19 +1197,19 @@ class NotionAgent(BaseFinanceAgent, DataPreservationMixin):
                 modified_metadata.description += "\nIMPORTANT: All parameters must be wrapped in an 'input' field."
             return modified_metadata
         
-        # Create the ReAct agent directly instead of using BaseFinanceAgent
-        self.agent = ReActAgent.from_tools(
+        # Create the ReAct agent using standard initialization (from_tools not available in this version)
+        chat_formatter = ReActChatFormatter(system_header=escaped_system_prompt)
+        object.__setattr__(self, 'agent', ReActAgent(
             tools=tools,
             llm=llm,
-            system_prompt=escaped_system_prompt,
+            memory=ChatMemoryBuffer.from_defaults(),
             max_iterations=self.config.get('max_iterations', 15),
-            verbose=True,
-            function_calling=True,  # Enable function calling for proper tool usage
-            tool_metadata_modifier_fn=tool_metadata_modifier_fn
-        )
+            react_chat_formatter=chat_formatter,
+            verbose=True
+        ))
         
-        # Register a tool callback for notion_tool to fix input format
-        self.agent.callback_manager.on_tool_start = self._handle_tool_start
+        # Note: callback_manager not available in this version of ReActAgent
+        # Tool input format handling will be done through other means if needed
         
         # Store the tools and other parameters for future use
         self._tools = tools
@@ -1202,8 +1218,8 @@ class NotionAgent(BaseFinanceAgent, DataPreservationMixin):
         
         logger.info("NotionAgent initialized with ReAct configuration")
         
-        # Create a custom execute method that handles notion_tool specially
-        self._original_execute = self.agent.aquery
+        # Note: aquery method not available in this version of ReActAgent
+        # Will use standard query/chat methods if needed
     
     async def _handle_tool_start(self, tool_name, tool_input):
         """Handle tool start event to fix input format for notion_tool"""
@@ -1361,8 +1377,11 @@ class NotionAgent(BaseFinanceAgent, DataPreservationMixin):
                                         update_result = await self.notion_tool.arun({
                                             "operation": "update_technical_analysis",
                                             "page_id": page_id,
-                                            "content": content_data,
-                                            "channel_name": formatted_data.get('Channel name', formatted_data.get('channel_name', 'Unknown Channel'))
+                                            "content": {
+                                                "summary": summary,
+                                                "key_points": key_points
+                                            },
+                                            "channel_name": input_text.get('Channel name', input_text.get('channel_name', 'Unknown Channel'))
                                         })
                                     else:
                                         logger.info(f"Creating new page for {stock} with rich content")
@@ -1697,7 +1716,7 @@ class AgentWorkflow:
         self.agent_debug_enabled = unified_config.get('agents', 'agent_debug', default=False)
         
         if self.agent_debug_enabled:
-            storage_base_path = unified_config.get('storage', 'base_path', default='/mnt/d/cash')
+            storage_base_path = unified_config.get('storage', 'base_path', default='C:\\cash-temp-data')
             self.debug_dir = Path(storage_base_path) / 'debug'
             try:
                 self.debug_dir.mkdir(exist_ok=True, parents=True)

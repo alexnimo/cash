@@ -30,8 +30,15 @@ from moviepy import VideoFileClip, AudioFileClip
 import yt_dlp
 import json
 from datetime import datetime
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+    YOUTUBE_TRANSCRIPT_AVAILABLE = True
+except ImportError:
+    YOUTUBE_TRANSCRIPT_AVAILABLE = False
+    YouTubeTranscriptApi = None
+    TranscriptsDisabled = Exception
+    NoTranscriptFound = Exception
 # Removed langtrace import
 from app.utils.path_utils import get_storage_subdir, get_storage_path
 import google.generativeai as genai
@@ -361,103 +368,43 @@ class VideoProcessor:
 
             logger.info(f"Extracted YouTube video ID: {video_id}")
 
-            # Create API instance
-            api = YouTubeTranscriptApi()
+            # Get available transcripts
+            logger.info("Fetching available transcripts...")
+            if not YOUTUBE_TRANSCRIPT_AVAILABLE:
+                raise ImportError("youtube_transcript_api is not available")
             
-            # Try to get English transcript first
-            logger.info("Trying to get English transcript...")
+            # Use correct API methods: create instance and call fetch
             try:
-                fetched_transcript = api.fetch(video_id, languages=['en'])
-                # The fetch method already returns a FetchedTranscript with transcript data
-                transcript_data = fetched_transcript
-                transcript_language = 'en'
-                logger.info("Found English transcript")
-            except NoTranscriptFound:
-                # If English not available, try any language
-                logger.info("No English transcript found, trying any available transcript...")
-                try:
-                    # List all available transcripts first
-                    transcript_list = api.list(video_id)
-                    if transcript_list:
-                        # Get the first available transcript
-                        available = list(transcript_list)
-                        if available:
-                            first_transcript = available[0]
-                            transcript_data = first_transcript.fetch()
-                            transcript_language = first_transcript.language_code
-                            logger.info(f"Using available transcript in language: {transcript_language}")
-                        else:
-                            logger.warning("No transcripts available")
-                            return None
-                    else:
-                        logger.warning("No transcripts available")
-                        return None
-                except NoTranscriptFound:
-                    logger.warning("No transcripts available")
-                    return None
-                except Exception as e:
-                    logger.error(f"Error getting any transcript: {str(e)}")
-                    return None
-
-            if transcript_data:
-                # Process the transcript data
-                logger.info(f"Processing transcript data in {transcript_language}...")
-                logger.info(f"Got transcript with {len(transcript_data)} segments")
+                ytt_api = YouTubeTranscriptApi()
+                fetched_transcript = ytt_api.fetch(video_id)
+                logger.info(f"Got transcript with {len(fetched_transcript)} segments")
                 
-                # Handle FetchedTranscriptSnippet objects
-                # Extract data in a way that works with both dictionary-like objects and FetchedTranscriptSnippet objects
-                processed_segments = []
-                for segment in transcript_data:
-                    # Try to access attributes as properties first, then fall back to dictionary access
-                    try:
-                        # If it's a FetchedTranscriptSnippet object with properties
-                        segment_dict = {
-                            "text": getattr(segment, "text", ""),
-                            "start": getattr(segment, "start", 0.0),
-                            "duration": getattr(segment, "duration", 0.0)
-                        }
-                    except Exception:
-                        # If it's a dictionary-like object
-                        try:
-                            segment_dict = {
-                                "text": segment.get("text", ""),
-                                "start": segment.get("start", 0.0),
-                                "duration": segment.get("duration", 0.0)
-                            }
-                        except Exception:
-                            # Last resort, try direct dictionary access
-                            try:
-                                segment_dict = {
-                                    "text": segment["text"] if "text" in segment else "",
-                                    "start": segment["start"] if "start" in segment else 0.0,
-                                    "duration": segment["duration"] if "duration" in segment else 0.0
-                                }
-                            except Exception as e:
-                                logger.warning(f"Could not extract data from transcript segment: {e}")
-                                segment_dict = {"text": "", "start": 0.0, "duration": 0.0}
-                    
-                    processed_segments.append(segment_dict)
+                # Convert to raw data and save to file
+                transcript_data = fetched_transcript.to_raw_data()
                 
-                # Save raw transcript text
-                raw_text = ' '.join(segment["text"] for segment in processed_segments)
-                raw_transcript_path = get_storage_path(f"videos/raw_transcripts/{video.id}.txt")
-                with open(raw_transcript_path, 'w', encoding='utf-8') as f:
-                    f.write(raw_text)
-                logger.info(f"Saved raw transcript to {raw_transcript_path}")
-                
-                # Save structured transcript to file
+                # Save structured transcript to file using proper path
                 transcript_path = get_storage_path(f"videos/transcripts/{video.id}.json")
-                logger.info(f"Saving transcript to {transcript_path}")
-                with open(transcript_path, 'w', encoding='utf-8') as f:
-                    json.dump({
-                        "language": transcript_language,
-                        "channel_name": video.metadata.channel_name if video.metadata else "",
-                        "video_name": video.metadata.video_title if video.metadata else "",
-                        "segments": processed_segments
-                    }, f, ensure_ascii=False, indent=2)
+                transcript_json = {
+                    "language": "en",
+                    "segments": [{
+                        "start": segment.get("start", 0.0),
+                        "duration": segment.get("duration", 0.0),
+                        "text": segment.get("text", "")
+                    } for segment in transcript_data]
+                }
                 
-                logger.info(f"Successfully saved transcript to {transcript_path}")
+                # Ensure directory exists
+                transcript_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(transcript_path, 'w', encoding='utf-8') as f:
+                    json.dump(transcript_json, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"Saved YouTube transcript to {transcript_path}")
                 return str(transcript_path)
+                
+            except Exception as e:
+                logger.error(f"Failed to get transcript: {e}")
+                return None
                 
         except TranscriptsDisabled:
             logger.error("Transcripts are disabled for this video")
@@ -469,32 +416,24 @@ class VideoProcessor:
             logger.error(f"Error getting YouTube transcript: {str(e)}", exc_info=True)
             return None
             
-    def __del__(self):
-        """Synchronous cleanup - async cleanup should be done explicitly via cleanup() method"""
-        try:
-            # Clean up any semaphores synchronously
-            if hasattr(self, 'semaphore'):
-                # Release any acquired semaphores
-                for _ in range(getattr(self.semaphore, '_value', 0)):
-                    try:
-                        self.semaphore.release()
-                    except (ValueError, AttributeError):
-                        # Stop if we've released too many or semaphore is gone
-                        break
-                logger.debug("Cleaned up semaphores during VideoProcessor deletion")
-        except Exception as e:
-            logger.error(f"Error in VideoProcessor cleanup: {e}")
-    
-    async def cleanup(self):
-        """Async cleanup method for proper resource management"""
+    async def __del__(self):
         try:
             # Close any open resources
-            if hasattr(self, 'model_manager') and self.model_manager is not None:
-                if hasattr(self.model_manager, 'close'):
-                    await self.model_manager.close()
-            logger.debug("VideoProcessor async cleanup completed")
+            if hasattr(self, 'model_manager'):
+                await self.model_manager.close()
+            
+            # Clean up any semaphores
+            if hasattr(self, 'semaphore'):
+                # Release any acquired semaphores
+                for _ in range(self.semaphore._value):
+                    try:
+                        self.semaphore.release()
+                    except ValueError:
+                        # Stop if we've released too many
+                        break
+                logger.info("Cleaned up semaphores during VideoProcessor deletion")
         except Exception as e:
-            logger.error(f"Error in VideoProcessor async cleanup: {e}")
+            logger.error(f"Error in VideoProcessor cleanup: {e}")
 
     async def process_video(self, video: Video) -> Video:
         """Process a video by downloading it and generating a transcript."""
@@ -588,16 +527,20 @@ class VideoProcessor:
                     if transcript_path:
                         logger.info(f"Successfully retrieved YouTube transcript from {transcript_path}")
                         # Parse the saved transcript file
-                        with open(transcript_path) as f:
-                            transcript_data = json.load(f)
-                            logger.info(f"Loaded transcript data with language: {transcript_data.get('language')}")
-                            video.transcript = [TranscriptSegment(
-                                start_time=entry.get('start', 0.0),
-                                end_time=entry.get('start', 0.0) + entry.get('duration', 0.0),
-                                text=entry.get('text', ''),
-                                language=transcript_data.get("language", 'en')
-                            ) for entry in transcript_data.get("segments", [])]
-                            logger.info(f"Created {len(video.transcript)} transcript segments")
+                        if transcript_path and Path(transcript_path).exists():
+                            with open(transcript_path) as f:
+                                transcript_data = json.load(f)
+                                logger.info(f"Loaded transcript data with language: {transcript_data.get('language')}")
+                                video.transcript = [TranscriptSegment(
+                                    start_time=entry.get('start', 0.0),
+                                    end_time=entry.get('start', 0.0) + entry.get('duration', 0.0),
+                                    text=entry.get('text', ''),
+                                    language=transcript_data.get("language", 'en')
+                                ) for entry in transcript_data.get("segments", [])]
+                        else:
+                            logger.warning(f"Transcript path is invalid or file doesn't exist: {transcript_path}")
+                            video.transcript = []
+                        logger.info(f"Created {len(video.transcript)} transcript segments")
                         self.video_status[video.id]["progress"]["transcribing"] = 100
                         logger.info("Using YouTube transcript")
                         transcript_obtained = True
@@ -1261,10 +1204,10 @@ class VideoProcessor:
                 base_delay = 1  # Start with 1 second delay
                 max_retries = 3
                 
-                # Check if audio processing is available
-                if not AUDIO_PROCESSING_AVAILABLE:
-                    logger.error("Audio processing library is not available. MoviePy AudioFileClip is required for audio processing")
-                    raise ImportError("Audio processing library is required for audio processing")
+                # Check if pydub is available for audio duration analysis
+                if not PYDUB_AVAILABLE:
+                    logger.warning("pydub library is not installed. Skipping audio duration checks and proceeding with transcript generation.")
+                    # Continue without pydub - we can still generate transcripts
 
                 if not Path(audio_path).exists():
                     logger.error(f"Audio file not found at path: {audio_path}")
@@ -1273,18 +1216,22 @@ class VideoProcessor:
                 MAX_CHUNK_DURATION_MS = config.get('transcript_generation', 'max_chunk_duration_minutes', default=30) * 60 * 1000
                 logger.info(f"Maximum audio chunk duration set to {config.get('transcript_generation', 'max_chunk_duration_minutes', default=30)} minutes ({MAX_CHUNK_DURATION_MS} ms).")
 
-                try:
-                    # Use MoviePy to get audio duration
-                    audio_clip = await asyncio.to_thread(AudioFileClip, audio_path)
-                    duration_ms = int(audio_clip.duration * 1000)  # Convert seconds to milliseconds
-                    logger.info(f"Audio duration: {duration_ms / 1000:.2f} seconds")
-                    audio_clip.close()  # Important to close the clip
-                except Exception as e:
-                    logger.error(f"Failed to load audio file with MoviePy: {e}")
-                    return None
+                # Get audio duration - use pydub if available, otherwise skip duration checks
+                duration_ms = None
+                if PYDUB_AVAILABLE:
+                    try:
+                        audio_segment = await asyncio.to_thread(AudioSegment.from_file, audio_path)
+                        duration_ms = len(audio_segment)
+                        logger.info(f"Audio duration: {duration_ms / 1000:.2f} seconds")
+                    except Exception as e:
+                        logger.error(f"Failed to load audio file with pydub: {e}")
+                        # Continue without duration info
+                        duration_ms = None
+                else:
+                    logger.info("Pydub not available - proceeding without audio duration analysis")
 
                 # --- Audio Processing Logic --- 
-                if duration_ms <= MAX_CHUNK_DURATION_MS:
+                if duration_ms is None or duration_ms <= MAX_CHUNK_DURATION_MS:
                     # --- Process shorter audio files (existing logic) --- 
                     logger.info("Audio duration is within limit, processing as a single file.")
                     audio_file = None
@@ -1338,8 +1285,8 @@ class VideoProcessor:
                             except Exception as delete_err:
                                 logger.warning(f"Failed to delete uploaded single audio file {audio_file.name}: {delete_err}")
                 else:
-                    # --- Process long audio files via segmentation using MoviePy --- 
-                    logger.info(f"Audio duration exceeds limit ({duration_ms} > {MAX_CHUNK_DURATION_MS} ms). Splitting into chunks using MoviePy.")
+                    # --- Process long audio files via segmentation --- 
+                    logger.info(f"Audio duration exceeds limit ({duration_ms} > {MAX_CHUNK_DURATION_MS} ms). Splitting into chunks.")
                     num_chunks = math.ceil(duration_ms / MAX_CHUNK_DURATION_MS)
                     logger.info(f"Splitting audio into {num_chunks} chunks.")
                     transcript_parts = []
@@ -1349,30 +1296,21 @@ class VideoProcessor:
                     try:
                         chunk_temp_dir.mkdir(parents=True, exist_ok=True)
                         logger.info(f"Created temporary chunk directory: {chunk_temp_dir}")
-                        
-                        # Load the full audio clip once
-                        full_audio_clip = await asyncio.to_thread(AudioFileClip, audio_path)
 
                         for i in range(num_chunks):
-                            start_seconds = (i * MAX_CHUNK_DURATION_MS) / 1000
-                            end_seconds = min(((i + 1) * MAX_CHUNK_DURATION_MS) / 1000, duration_ms / 1000)
-                            logger.info(f"Processing chunk {i+1}/{num_chunks} ({start_seconds:.2f}s to {end_seconds:.2f}s)")
+                            start_ms = i * MAX_CHUNK_DURATION_MS
+                            end_ms = min((i + 1) * MAX_CHUNK_DURATION_MS, duration_ms)
+                            logger.info(f"Processing chunk {i+1}/{num_chunks} ({start_ms/1000:.2f}s to {end_ms/1000:.2f}s)")
                             
+                            chunk_segment = audio_segment[start_ms:end_ms]
                             chunk_filename = f"{base_filename}_chunk_{i+1}.wav"
                             chunk_path = chunk_temp_dir / chunk_filename
                             uploaded_chunk_file = None
 
                             try:
-                                # Create audio subclip using MoviePy
-                                chunk_clip = full_audio_clip.subclipped(start_seconds, end_seconds)
-                                
-                                # Export chunk using MoviePy
-                                await asyncio.to_thread(chunk_clip.write_audiofile, str(chunk_path), 
-                                                       verbose=False, logger=None)
+                                # Export chunk
+                                await asyncio.to_thread(chunk_segment.export, chunk_path, format="wav")
                                 logger.info(f"Exported chunk {i+1} to {chunk_path}")
-                                
-                                # Close the chunk clip to free memory
-                                chunk_clip.close()
 
                                 # Upload chunk
                                 uploaded_chunk_file = await asyncio.to_thread(genai.upload_file, chunk_path, mime_type="audio/wav")
@@ -1415,14 +1353,6 @@ class VideoProcessor:
                         logger.error(f"Error during audio chunking process: {e}")
                         raw_text = None # Indicate failure
                     finally:
-                        # Close the full audio clip
-                        if 'full_audio_clip' in locals():
-                            try:
-                                full_audio_clip.close()
-                                logger.info("Closed full audio clip")
-                            except Exception as close_err:
-                                logger.warning(f"Error closing full audio clip: {close_err}")
-                        
                         # Cleanup temporary directory
                         if chunk_temp_dir.exists():
                             try:
@@ -1468,6 +1398,12 @@ class VideoProcessor:
                     logger.warning("Could not save raw Gemini transcript as audio_path was missing.")
             
             logger.info(f"DEBUG: Preparing to process raw transcript into segments with {'raw_text available' if raw_text else 'NO raw_text'}")
+            
+            # Ensure we have raw_text before processing
+            if not raw_text:
+                logger.error("No raw transcript text available for processing")
+                return []
+            
             # Process raw transcript into segments
             words = raw_text.split()
             words_per_segment = 20
