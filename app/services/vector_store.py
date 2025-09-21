@@ -1,9 +1,23 @@
 from abc import ABC, abstractmethod
 import os
-from pinecone import Pinecone, ServerlessSpec
-import lancedb
 from typing import List, Dict, Any, Optional
 import numpy as np
+
+# Optional imports with graceful fallback
+try:
+    from pinecone import Pinecone, ServerlessSpec
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+    Pinecone = None
+    ServerlessSpec = None
+
+try:
+    import lancedb
+    LANCEDB_AVAILABLE = True
+except ImportError:
+    LANCEDB_AVAILABLE = False
+    lancedb = None
 from app.core.config import get_settings
 from app.models.video import TranscriptSegment
 from datetime import datetime
@@ -35,6 +49,9 @@ class VectorStore(ABC):
 
 class PineconeStore(VectorStore):
     def __init__(self):
+        if not PINECONE_AVAILABLE:
+            raise VectorStoreError("Pinecone is not available - package not installed")
+            
         try:
             api_key = settings.vector_store.config.api_key
             if api_key.startswith('${'):
@@ -162,6 +179,9 @@ class PineconeStore(VectorStore):
 
 class LanceDBStore(VectorStore):
     def __init__(self):
+        if not LANCEDB_AVAILABLE:
+            raise VectorStoreError("LanceDB is not available - package not installed")
+            
         try:
             os.makedirs(settings.lancedb_uri, exist_ok=True)
             self.db = lancedb.connect(settings.lancedb_uri)
@@ -264,12 +284,20 @@ class LanceDBStore(VectorStore):
             logger.error(f"Failed to store transcript: {str(e)}")
             raise VectorStoreError(f"Failed to store transcript: {str(e)}")
 
-def get_vector_store() -> VectorStore:
+def get_vector_store() -> Optional[VectorStore]:
     """Get the configured vector store instance"""
     try:
         if settings.vector_store.type == "pinecone":
+            if not PINECONE_AVAILABLE:
+                logger.warning("Pinecone not available, vector store disabled")
+                return None
             return PineconeStore()
-        return LanceDBStore()
+        else:
+            if not LANCEDB_AVAILABLE:
+                logger.warning("LanceDB not available, vector store disabled")
+                return None
+            return LanceDBStore()
     except Exception as e:
         logger.error(f"Failed to initialize vector store: {str(e)}")
-        raise VectorStoreError(f"Failed to initialize vector store: {str(e)}")
+        logger.warning("Vector store disabled due to initialization failure")
+        return None

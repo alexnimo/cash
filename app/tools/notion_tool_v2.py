@@ -470,7 +470,7 @@ WORKFLOW STEPS:
                 
                 # Property names
                 ta_summary_name = self.properties.get("ta_summary", {}).get("name", "TA Summary")
-                key_points_name = self.properties.get("key_points", {}).get("name", "Key Points") 
+                key_points_name = self.properties.get("key_points", {}).get("name", "Highlights") 
                 date_name = self.properties.get("date", {}).get("name", "Date")
                 source_name = self.properties.get("source", {}).get("name", "Source")
                 
@@ -677,10 +677,19 @@ WORKFLOW STEPS:
             update_props = {}
             
             # Map our property names to actual property names in the database
+            ta_summary_name = self.properties.get("ta_summary", {}).get("name", "Technical Analysis Summary")  # Map ta_summary to Technical Analysis Summary
             highlights_name = self.properties.get("key_points", {}).get("name", "Highlights")  # Map key_points to Highlights
             update_date_name = self.properties.get("update_date", {}).get("name", "Update Date")  # Use Update Date instead of Date
             
             # Check which properties exist before adding them to update_props
+            if ta_summary_name in existing_properties:
+                update_props[ta_summary_name] = {
+                    "rich_text": [{"text": {"content": summary[:2000]}}]
+                }
+                logger.info(f"Will update '{ta_summary_name}' property with summary data")
+            else:
+                logger.info(f"Property '{ta_summary_name}' doesn't exist in the database")
+                
             if highlights_name in existing_properties:
                 update_props[highlights_name] = {
                     "rich_text": [{"text": {"content": key_points_text[:2000]}}]

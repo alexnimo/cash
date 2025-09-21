@@ -1,6 +1,6 @@
 # CASH (Compact Analysis System Hub)
 
-A powerful tool for analyzing YouTube videos using AI, featuring intelligent chat capabilities and vector-based search.
+A powerful AI-driven analysis platform featuring YouTube video processing and the DannyTrades Agent for automated stock market analysis and trading insights.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)
@@ -8,47 +8,61 @@ A powerful tool for analyzing YouTube videos using AI, featuring intelligent cha
 
 ## Features
 
-- **Video Processing**
-  - Single video upload and analysis
-  - Multiple videos batch processing with sequential queue
-  - YouTube playlist support
-  - Automatic transcription and content extraction
-  - File upload API for direct video uploads
-  - Intelligent video processing queue management
+### 🎥 Video Processing
+- Single video upload and analysis
+- Multiple videos batch processing with sequential queue
+- YouTube playlist support
+- Automatic transcription and content extraction
+- File upload API for direct video uploads
+- Intelligent video processing queue management
 
-- **AI-Powered Analysis**
-  - Advanced language model integration
-  - Vector-based similarity search
-  - Intelligent content summarization
-  - Context-aware chat interface
+### 📈 DannyTrades Agent
+- **Multi-LLM Support**: Claude, OpenAI, Gemini, Ollama, Groq, Mistral
+- **Stock Data Processing**: Automated analysis of stock market data
+- **Notion Integration**: Seamless MCP-based database updates
+- **Real-time Monitoring**: Live performance metrics and activity tracking
+- **Web Dashboard**: Modern UI with Shadcn components
+- **Provider Management**: Dynamic LLM provider switching
+- **Performance Analytics**: Request tracking, success rates, response times
 
-- **Enhanced User Interface**
-  - Modern, responsive web interface
-  - Real-time processing status updates
-  - Enhanced console log with scroll, color coding, and timestamps
-  - Interactive chat with processed content
-  - Video processing queue status monitoring
-  - Easy-to-use upload forms
+### 🤖 AI-Powered Analysis
+- Advanced language model integration
+- Vector-based similarity search
+- Intelligent content summarization
+- Context-aware chat interface
 
-- **System Management**
-  - Automated file cleanup service (janitor) with cron scheduling
-  - Configurable retention policies
-  - Background maintenance tasks
-  - Queue management and monitoring
+### 🖥️ Enhanced User Interface
+- Modern, responsive web interface
+- Real-time processing status updates
+- Enhanced console log with scroll, color coding, and timestamps
+- Interactive chat with processed content
+- Video processing queue status monitoring
+- Easy-to-use upload forms
+- DannyTrades Agent dashboard with live metrics
 
-- **API Integration**
-  - RESTful API for video upload and analysis
-  - Queue management endpoints
-  - File cleanup management
-  - Real-time status monitoring
+### ⚙️ System Management
+- Automated file cleanup service (janitor) with cron scheduling
+- Configurable retention policies
+- Background maintenance tasks
+- Queue management and monitoring
+
+### 🔌 API Integration
+- RESTful API for video upload and analysis
+- DannyTrades Agent endpoints for stock processing
+- Queue management endpoints
+- File cleanup management
+- Real-time status monitoring
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.8 or higher
-- pip package manager
+- UV package manager (recommended) or pip
+- Node.js and npm (for MCP servers)
 - YouTube Data API key (optional, for enhanced playlist features)
+- API keys for LLM providers (OpenAI, Anthropic, etc.) for DannyTrades Agent
+- Notion API key and database setup for DannyTrades integration
 
 ### Installation
 
@@ -58,33 +72,57 @@ git clone https://github.com/yourusername/video-analyzer.git
 cd video-analyzer
 ```
 
-2. Run the setup script:
+2. Install dependencies using UV (recommended):
 ```bash
-# On Linux/Mac:
-chmod +x setup.sh
-./setup.sh
+# Install UV if not already installed
+pip install uv
 
-# On Windows (using Git Bash or WSL):
-bash setup.sh
+# Install project dependencies
+uv sync
+
+# Activate the virtual environment
+source .venv/bin/activate  # On Linux/Mac
+# OR
+.venv\Scripts\activate  # On Windows
 ```
 
-The setup script will:
-- Verify Python installation
-- Check project structure
-- Create and activate a virtual environment
-- Install all dependencies
-- Verify Python imports
-- Provide detailed diagnostic information if anything goes wrong
-
-3. Start the server:
+Alternatively, use pip:
 ```bash
-# Activate the virtual environment (if not already activated)
-source venv/bin/activate  # On Linux/Mac
-# OR
-.\venv\Scripts\activate  # On Windows
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Linux/Mac or .venv\Scripts\activate on Windows
 
-# Start the server from the project root
-python -m app.main
+# Install dependencies
+pip install -r requirements.txt
+```
+
+3. Configure environment variables:
+```bash
+# Copy the example environment file
+cp .env.example .env
+
+# Edit .env with your API keys and configuration
+# Required for DannyTrades Agent:
+# - OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.
+# - NOTION_API_KEY and NOTION_DATABASE_ID
+```
+
+4. Install MCP servers (for DannyTrades Agent):
+```bash
+# Install the official Notion MCP server
+npm install -g @modelcontextprotocol/server-notion
+
+# Or install locally in your project
+npm install @modelcontextprotocol/server-notion
+```
+
+5. Start the server:
+```bash
+# Using UV
+uv run python main.py
+
+# Or with standard Python
+python main.py
 ```
 
 > ⚠️ **Important**: Always run the server from the project root directory, not from within the `app` directory.
@@ -110,6 +148,58 @@ python -m app.main
 4. Videos are processed sequentially to avoid rate limits
 5. Interact with combined content through chat
 
+### DannyTrades Agent Usage
+
+Access the DannyTrades Agent dashboard at `http://localhost:8000` and navigate to the "DannyTrades" tab.
+
+#### Configuration
+1. **LLM Provider Setup**: Configure your preferred AI provider (Claude, OpenAI, Gemini, etc.)
+2. **MCP Server Setup**: The agent uses the official Notion MCP server via stdio transport
+3. **Environment Variables**: Ensure all required API keys are configured
+
+#### MCP Server Configuration
+The DannyTrades Agent supports flexible MCP server configuration:
+
+```python
+# Default configuration uses official Notion MCP server
+mcp_servers = [
+    {
+        "name": "notion",
+        "transport_type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-notion"],
+        "env": {
+            "NOTION_API_KEY": "your_notion_api_key",
+            "NOTION_DATABASE_ID": "your_database_id"
+        }
+    }
+]
+```
+
+You can also use:
+- **Alternative MCP servers**: Any MCP-compatible server
+- **MCP Proxy servers**: For advanced routing and management
+- **SSE Transport**: For server-sent events based communication
+
+#### Stock Data Processing
+```bash
+# Process stock data via API
+curl -X POST "http://localhost:8000/api/dannytrades/process" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "AAPL",
+    "price": 150.25,
+    "volume": 1000000,
+    "sentiment": "bullish"
+  }'
+```
+
+#### Real-time Monitoring
+- View live performance metrics in the dashboard
+- Monitor processing activities and success rates
+- Track LLM provider performance and costs
+- Monitor MCP server connections and tool availability
+
 ### File Upload API
 Upload video files directly via API:
 ```bash
@@ -122,15 +212,6 @@ curl -X POST "http://localhost:8000/api/upload-video" \
   -F "priority=1"
 ```
 
-### URL Analysis API
-Analyze videos from URLs:
-```bash
-curl -X POST "http://localhost:8000/api/analyze-url" \
-  -H "accept: application/json" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "url=https://www.youtube.com/watch?v=VIDEO_ID&title=My Video&priority=1"
-```
-
 ## Architecture
 
 ### Components
@@ -140,6 +221,15 @@ curl -X POST "http://localhost:8000/api/analyze-url" \
   - Async video processing
   - WebSocket support for real-time updates
   - Static file serving
+  - DannyTrades Agent API endpoints
+
+- **DannyTrades Agent System**
+  - Multi-LLM provider support (Claude, OpenAI, Gemini, Ollama, Groq, Mistral)
+  - Agno AI framework integration
+  - MCP (Model Context Protocol) tools for Notion
+  - Performance monitoring and analytics
+  - Real-time activity tracking
+  - Async processing with retry mechanisms
 
 - **Video Processing Pipeline**
   - YouTube video download

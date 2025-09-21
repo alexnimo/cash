@@ -1,0 +1,28 @@
+{
+  "test_timestamp": "2025-09-15T20:05:44.406067",
+  "tests": {
+    "zai_api_only": {
+      "status": "success",
+      "processing_time": 6.254137754440308,
+      "response_length": 841,
+      "content_preview": "# Investment Analysis: TIMEOUT_TEST\n\n**Current Performance:**\n- Trading at $100.0 with a solid 2.5% gain\n- Volume at 1,000,000 shares indicates moderate trading interest\n\n**Assessment:**\nThe stock sho..."
+    },
+    "mcp_integration_only": {
+      "status": "error",
+      "processing_time": 0.26694488525390625,
+      "mcp_result": {
+        "success": false,
+        "error": "'SimpleDannyTradesAgent' object has no attribute '_get_model'"
+      }
+    },
+    "combined_zai_mcp": {
+      "status": "success",
+      "processing_time": 8.357870817184448,
+      "result": {
+        "success": true,
+        "error_message": null,
+        "reasoning_length": 32
+      }
+    }
+  }
+}

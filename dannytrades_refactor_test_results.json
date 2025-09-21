@@ -1,0 +1,70 @@
+{
+  "test_timestamp": "2025-09-15T16:46:56.246936",
+  "tests": {
+    "zai_provider": {
+      "status": "error",
+      "provider": "zai",
+      "processing_time": 2.2186672687530518,
+      "reasoning_length": 0,
+      "error_message": "Z.AI processing failed: Z.AI API error 404: {\"timestamp\":\"2025-09-15T13:46:57.700+00:00\",\"status\":404,\"error\":\"Not Found\",\"path\":\"/chat/completions\"}",
+      "stock_symbol": "ZAI_TEST",
+      "unified_function_used": true
+    },
+    "openai_provider": {
+      "status": "error",
+      "provider": "openai",
+      "processing_time": 0.6711692810058594,
+      "reasoning_length": 0,
+      "error_message": "openai processing failed: Incorrect role information",
+      "stock_symbol": "OPENAI_TEST",
+      "agno_function_used": true
+    },
+    "claude_provider": {
+      "status": "skipped",
+      "reason": "claude provider not enabled",
+      "provider": "claude"
+    },
+    "gemini_provider": {
+      "status": "error",
+      "provider": "gemini",
+      "processing_time": 0.9245767593383789,
+      "reasoning_length": 0,
+      "error_message": "gemini processing failed: <Response [400 Bad Request]>",
+      "stock_symbol": "GEMINI_TEST",
+      "agno_function_used": true
+    },
+    "ollama_provider": {
+      "status": "success",
+      "provider": "ollama",
+      "processing_time": 120.63271594047546,
+      "reasoning_length": 15680,
+      "error_message": null,
+      "stock_symbol": "OLLAMA_TEST",
+      "agno_function_used": true
+    },
+    "mcp_integration": {
+      "status": "success",
+      "mcp_servers": {
+        "notion": {
+          "status": "available",
+          "type": "official_mcp_server"
+        }
+      },
+      "notion_available": true
+    },
+    "config_prompts": {
+      "status": "success",
+      "instructions_length": 564,
+      "has_database_id": false,
+      "has_specialized_content": true,
+      "preview": "You are an **expert Notion Stock Database Agent**. Your role is to maintain the Notion database (ID: `20ef056c191c80068fd5f728fee3bda0`) in a way that ensures high precision, accuracy, and contextual ..."
+    }
+  },
+  "summary": {
+    "total_tests": 7,
+    "successful": 3,
+    "skipped": 1,
+    "failed": 3,
+    "success_rate": "50.0%"
+  }
+}

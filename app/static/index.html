@@ -181,7 +181,18 @@
 </head>
 <body class="bg-gray-100">
     <div class="container mx-auto px-4 py-8">
-        <h1 class="text-3xl font-bold mb-8 text-center">YouTube Video Analyzer</h1>
+        <!-- Navigation Header -->
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold">YouTube Video Analyzer</h1>
+            <nav class="flex space-x-4">
+                <a href="/dannytrades.html" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors duration-200 flex items-center">
+                    <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                    </svg>
+                    DannyTrades Dashboard
+                </a>
+            </nav>
+        </div>
         
         <!-- Upload Forms -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
@@ -313,35 +324,6 @@
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                         <button type="button" class="btn btn-primary" id="saveSettings">Save changes</button>
                     </div>
-    <!-- Settings Modal -->
-    <div class="modal fade" id="settingsModal" tabindex="-1" aria-labelledby="settingsModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="settingsModalLabel">Settings</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <form id="settingsForm">
-                        <!-- Gemini API Settings -->
-                        <div class="mb-3">
-                            <label for="geminiApiKey" class="form-label">Gemini API Key</label>
-                            <input type="password" class="form-control" id="geminiApiKey" placeholder="Enter your Gemini API key">
-                        </div>
-                        <!-- Rate Limiting Settings -->
-                        <div class="mb-3">
-                            <label for="geminiRpm" class="form-label">Gemini Requests per Minute</label>
-                            <input type="number" class="form-control" id="geminiRpm" min="1" max="60" 
-                                   placeholder="Enter RPM (1-60)" value="12">
-                            <small class="form-text text-muted">
-                                Controls how many requests are sent to Gemini per minute. Lower values reduce rate limiting but increase processing time.
-                            </small>
-                        </div>
-                    </form>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                    <button type="button" class="btn btn-primary" id="saveSettings">Save changes</button>
                 </div>
             </div>
         </div>

@@ -12,6 +12,7 @@ class VideoStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+    ERROR = "error"
 
 class VideoMetadata(BaseModel):
     title: str

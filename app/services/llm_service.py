@@ -1,13 +1,28 @@
 """LLM Service module for handling LLM operations"""
 from typing import Dict, Any, Optional, List
-from llama_index.core import VectorStoreIndex, Document
-from llama_index.vector_stores.pinecone import PineconeVectorStore
-import pinecone
-from pinecone import Pinecone, ServerlessSpec
 import os
 import json
 import time
 import logging
+
+# Optional imports with graceful fallback
+try:
+    from llama_index.core import VectorStoreIndex, Document
+    LLAMA_INDEX_AVAILABLE = True
+except ImportError:
+    LLAMA_INDEX_AVAILABLE = False
+    VectorStoreIndex = None
+    Document = None
+
+try:
+    from llama_index.vector_stores.pinecone import PineconeVectorStore
+    from pinecone import Pinecone, ServerlessSpec
+    PINECONE_AVAILABLE = True
+except ImportError:
+    PINECONE_AVAILABLE = False
+    PineconeVectorStore = None
+    Pinecone = None
+    ServerlessSpec = None
 
 from app.llm.llm_factory import LLMFactory
 from app.config.agent_config import AGENT_CONFIG
@@ -26,7 +41,17 @@ class LLMService:
     def __init__(self):
         """Initialize LLM service"""
         self.llm_factory = LLMFactory()
-        self.pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+        
+        # Initialize Pinecone only if available
+        if PINECONE_AVAILABLE and os.getenv('PINECONE_API_KEY'):
+            try:
+                self.pc = Pinecone(api_key=os.getenv('PINECONE_API_KEY'))
+            except Exception as e:
+                logger.warning(f"Failed to initialize Pinecone: {e}")
+                self.pc = None
+        else:
+            self.pc = None
+            
         self._langtrace = None  # LangTrace disabled
         self._model_manager = None
         
@@ -36,13 +61,20 @@ class LLMService:
             self._model_manager = ModelManager(settings)
         return self._model_manager
         
-    def create_index(self, texts: List[str], agent_type: str = 'rag') -> VectorStoreIndex:
+    def create_index(self, texts: List[str], agent_type: str = 'rag') -> Optional[VectorStoreIndex]:
         """Create a vector store index from texts
         
         Args:
             texts: List of text documents to index
             agent_type: Type of agent configuration to use
+            
+        Returns:
+            VectorStoreIndex if successful, None if dependencies unavailable
         """
+        if not LLAMA_INDEX_AVAILABLE or not PINECONE_AVAILABLE or not self.pc:
+            logger.warning("Pinecone or LlamaIndex not available, skipping index creation")
+            return None
+            
         config = AGENT_CONFIG.get(agent_type, {})
         embedding_config = config.get('embedding', {})
         
@@ -84,14 +116,21 @@ class LLMService:
         
         return index
         
-    def query_index(self, query: str, index: VectorStoreIndex, agent_type: str = 'rag') -> str:
+    def query_index(self, query: str, index: Optional[VectorStoreIndex], agent_type: str = 'rag') -> str:
         """Query the vector store index
         
         Args:
             query: Query string
-            index: Vector store index to query
+            index: Vector store index to query (can be None if unavailable)
             agent_type: Type of agent configuration to use
+            
+        Returns:
+            Query response or fallback message
         """
+        if not index or not LLAMA_INDEX_AVAILABLE:
+            logger.warning("Vector index not available, returning fallback response")
+            return f"Vector search not available. Query: {query}"
+            
         config = AGENT_CONFIG.get(agent_type, {})
         llm = self.llm_factory.create_llm(config.get('llm', {}))
         

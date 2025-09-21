@@ -191,4 +191,8 @@ async def process_technical_analysis_from_url(url: str):
         logger.error(f"Error in processing technical analysis from URL: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+# Include DannyTrades routes
+from .dannytrades_routes import router as dannytrades_router
+router.include_router(dannytrades_router)
+
 router.include_router(agent_router, prefix="/api/agents")
