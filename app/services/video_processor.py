@@ -731,7 +731,19 @@ class VideoProcessor:
             logger.info(f"Downloading video from URL: {video_url}")
             
             # First extract metadata without downloading
-            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            metadata_opts = {
+                'quiet': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['web', 'web_safari', 'android'],  # Use multiple client fallbacks
+                        'player_skip': ['configs'],  # Skip problematic configs
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            }
+            with yt_dlp.YoutubeDL(metadata_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
                 if info is None:
                     raise VideoProcessingError("Failed to get video metadata")
@@ -776,16 +788,25 @@ class VideoProcessor:
                 
                 logger.info(f"Processed metadata - Channel: {channel_name}, Title: {video.metadata.video_title}")
             
-            # Download video only
+            # Download video only with improved compatibility
             video_opts = {
-                'format': 'bestvideo[height<=?1080]/mp4',  # Get best video up to 1080p
+                'format': 'best[height<=?1080][ext=mp4]/best[height<=?1080]/best[ext=mp4]/best',  # More flexible format selection
                 'outtmpl': str(self.video_dir / f'{video.id}.%(ext)s'),
                 'progress_hooks': [lambda d: self._update_download_progress(video.id, d)],
                 'quiet': True,
                 'no_warnings': True,
                 'ignoreerrors': False,
                 'nocheckcertificate': True,
-                'source_address': '0.0.0.0',  # Force ipv4  # Use cookies file
+                'source_address': '0.0.0.0',  # Force ipv4
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['web', 'web_safari', 'android'],  # Use multiple client fallbacks
+                        'player_skip': ['configs'],  # Skip problematic configs
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
             }
             
             # Download video
